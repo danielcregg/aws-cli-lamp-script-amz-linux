@@ -355,17 +355,17 @@ fi
 #----------------
 # Database Tools
 #----------------
-if [ '"$INSTALL_DB"' = true ]; then
-    echo "Installing Adminer..."
-    sudo dnf install -y adminer
-    echo "Configuring Adminer..."
-    sudo ln -s /etc/adminer/conf.d/adminer.conf /etc/httpd/conf.d/adminer.conf || true
-    sudo mysql -Bse "CREATE USER IF NOT EXISTS admin@localhost IDENTIFIED BY '\''password'\'';GRANT ALL PRIVILEGES ON *.* TO admin@localhost;FLUSH PRIVILEGES;"
-    sudo systemctl reload httpd
+#if [ '"$INSTALL_DB"' = true ]; then
+#    echo "Installing Adminer..."
+#    sudo dnf install -y adminer
+#    echo "Configuring Adminer..."
+#    sudo ln -s /etc/adminer/conf.d/adminer.conf /etc/httpd/conf.d/adminer.conf || true
+#    sudo mysql -Bse "CREATE USER IF NOT EXISTS admin@localhost IDENTIFIED BY '\''password'\'';GRANT ALL PRIVILEGES ON *.* TO admin@localhost;FLUSH PRIVILEGES;"
+#    sudo systemctl reload httpd
 
-    echo "Installing phpMyAdmin..."
-    sudo dnf install -y phpmyadmin
-fi
+#    echo "Installing phpMyAdmin..."
+#    sudo dnf install -y phpmyadmin
+#fi
 
 #----------------
 # WordPress
