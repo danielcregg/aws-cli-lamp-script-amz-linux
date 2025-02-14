@@ -318,7 +318,7 @@ if [ '"$INSTALL_LAMP"' = true ]; then
 
     echo "Installing LAMP stack..."
     sudo dnf install -y httpd 
-    MARIADB_LATEST_PACKAGE=$(dnf list available | grep -E '^mariadb[0-9]+-server' | awk '{print $1}' | sort -V | tail -n 1)
+    MARIADB_LATEST_PACKAGE=$(dnf list available | grep -E "^mariadb[0-9]+-server" | awk "{print \$1}" | sort -V | tail -n 1)
     sudo dnf install -y "$MARIADB_LATEST_PACKAGE"
     sudo dnf install -y php
 
