@@ -324,6 +324,7 @@ if [ '"$INSTALL_LAMP"' = true ]; then
 
     echo "Configuring LAMP..."
     sudo sed -i.bak -e "s/DirectoryIndex index.html/DirectoryIndex index.php index.html/" /etc/httpd/conf/httpd.conf || true
+    sudo dnf install -y wget
     sudo wget https://raw.githubusercontent.com/danielcregg/simple-php-website/main/index.php -P /var/www/html/
     sudo rm -f /var/www/html/index.html
     sudo chown -R apache:apache /var/www
