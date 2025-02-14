@@ -424,8 +424,6 @@ if [ "$INSTALL_MATOMO" = true ]; then
     sudo -u apache wp plugin install super-progressive-web-apps --activate --path=/var/www/html/
 fi
 
-ENDSSH
-
 ###########################################
 # Final Status Output
 ###########################################
