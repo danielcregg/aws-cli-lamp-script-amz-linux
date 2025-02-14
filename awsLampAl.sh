@@ -295,25 +295,26 @@ echo "Host vm
     User ec2-user
     IdentityFile ~/.ssh/${SSH_KEY_NAME}" > ~/.ssh/config
 
-echo "Attempting to establish SSH connection..."
-count=0
-while ! ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -i ~/.ssh/${SSH_KEY_NAME} ec2-user@$ELASTIC_IP 'exit' 2>/dev/null; do
-    count=$((count+1))
-    printf "\rAttempt %d/%d " $count $MAX_RETRIES
-    if [ $count -eq $MAX_RETRIES ]; then
-        echo -e "\nFailed to establish SSH connection after $MAX_RETRIES attempts"
-        exit 1
-    fi
-    sleep 2
-done
-echo -e "\nSSH connection established!"
+#echo "Attempting to establish SSH connection..."
+#count=0
+#while ! ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -i ~/.ssh/${SSH_KEY_NAME} ec2-user@$ELASTIC_IP 'exit' 2>/dev/null; do
+#    count=$((count+1))
+#    printf "\rAttempt %d/%d " $count $MAX_RETRIES
+#    if [ $count -eq $MAX_RETRIES ]; then
+#        echo -e "\nFailed to establish SSH connection after $MAX_RETRIES attempts"
+#        exit 1
+#    fi
+#    sleep 2
+#done
+#echo -e "\nSSH connection established!"
 
 ###########################################
 # Installation Phase
 ###########################################
 
 echo "Starting software installation..."
-ssh -o StrictHostKeyChecking=no -i ~/.ssh/key_WebServerAuto ec2-user@$ELASTIC_IP \
+#ssh -o StrictHostKeyChecking=no -i ~/.ssh/key_WebServerAuto ec2-user@$ELASTIC_IP \
+ssh vm \
 '\
 set -e
 
