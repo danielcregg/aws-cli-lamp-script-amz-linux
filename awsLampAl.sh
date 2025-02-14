@@ -315,7 +315,7 @@ echo -e "\nSSH connection established!"
 echo "Starting software installation..."
 #ssh -o StrictHostKeyChecking=no vm \
 ssh -o StrictHostKeyChecking=no -i ~/.ssh/key_WebServerAuto ec2-user@$ELASTIC_IP \
-'\
+"
 set -e
 
 #----------------
@@ -452,4 +452,4 @@ printf "\nYou can SSH into your new VM on this Cloud Shell using: \e[3;4;33mssh 
 echo "********************************"
 echo "* SUCCESS! - Script completed! *"
 echo "********************************"
-'
+"
