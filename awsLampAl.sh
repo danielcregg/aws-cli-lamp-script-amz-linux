@@ -317,7 +317,10 @@ if [ '"$INSTALL_LAMP"' = true ]; then
     sudo dnf makecache
 
     echo "Installing LAMP stack..."
-    sudo dnf install -y httpd mariadb-server php
+    sudo dnf install -y httpd 
+    MARIADB_LATEST_PACKAGE=$(dnf list available | grep -E '^mariadb[0-9]+-server' | awk '{print $1}' | sort -V | tail -n 1)
+    sudo dnf install -y "$MARIADB_LATEST_PACKAGE"
+    sudo dnf install -y php
 
     echo "Configuring LAMP..."
     sudo sed -i.bak -e "s/DirectoryIndex index.html/DirectoryIndex index.php index.html/" /etc/httpd/conf/httpd.conf || true
