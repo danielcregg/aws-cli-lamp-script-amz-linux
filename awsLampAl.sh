@@ -314,7 +314,7 @@ echo "Host vm
 
 echo "Starting software installation..."
 #ssh -o StrictHostKeyChecking=no -i ~/.ssh/key_WebServerAuto ec2-user@$ELASTIC_IP \
-ssh vm \
+ssh -o StrictHostKeyChecking=no vm \
 '\
 set -e
 
