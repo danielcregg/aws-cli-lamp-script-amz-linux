@@ -35,8 +35,6 @@ INSTALL_MATOMO=false
 ###########################################
 # Helper Functions
 ###########################################
-
-# Function to show spinner while waiting
 show_spinner() {
     local message="$1"
     echo -en "\r\033[K$message"
@@ -46,7 +44,6 @@ show_spinner() {
     done
 }
 
-# Function to check resource status
 wait_for_termination() {
     local resource_id="$1"
     local resource_type="$2"
@@ -56,8 +53,7 @@ wait_for_termination() {
 ###########################################
 # Command Line Argument Processing
 ###########################################
-for arg in "$@"
-do
+for arg in "$@"; do
     case $arg in
         -lamp)
             INSTALL_LAMP=true
@@ -110,8 +106,7 @@ printf "\e[3;4;31mStarting cleanup of AWS resources...\e[0m\n"
 echo "1. Cleaning up Elastic IPs..."
 EXISTING_ELASTIC_IP_ALLOCATION_IDS=$(aws ec2 describe-tags \
     --filters "Name=key,Values=Name" "Name=value,Values=${ELASTIC_IP_TAG_NAME}" "Name=resource-type,Values=elastic-ip" \
-    --query 'Tags[*].ResourceId' \
-    --output text)
+    --query 'Tags[*].ResourceId' --output text)
 if [ -n "$EXISTING_ELASTIC_IP_ALLOCATION_IDS" ]; then
     echo " - Found existing Elastic IPs, releasing..."
     for ALLOCATION_ID in $EXISTING_ELASTIC_IP_ALLOCATION_IDS; do
@@ -126,8 +121,7 @@ fi
 echo "2. Cleaning up EC2 instances..."
 EXISTING_INSTANCE_IDS=$(aws ec2 describe-instances \
     --filters "Name=tag:Name,Values=${INSTANCE_TAG_NAME}" "Name=instance-state-name,Values=running,pending,stopping,stopped" \
-    --query 'Reservations[*].Instances[*].InstanceId' \
-    --output text)
+    --query 'Reservations[*].Instances[*].InstanceId' --output text)
 if [ -n "$EXISTING_INSTANCE_IDS" ]; then
     echo " - Found existing instances, terminating..."
     aws ec2 terminate-instances --instance-ids $EXISTING_INSTANCE_IDS > /dev/null
@@ -154,11 +148,14 @@ fi
 
 # 3. Clean up security groups
 echo "3. Cleaning up security groups..."
-EXISTING_SG_ID=$(aws ec2 describe-security-groups --group-names ${SECURITY_GROUP_NAME} --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null)
+EXISTING_SG_ID=$(aws ec2 describe-security-groups --group-names ${SECURITY_GROUP_NAME} \
+    --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null)
 if [ -n "$EXISTING_SG_ID" ] && [ "$EXISTING_SG_ID" != "None" ]; then
     echo " - Found existing security group, checking dependencies..."
     while true; do
-        DEPENDENT_INSTANCES=$(aws ec2 describe-instances --filters "Name=instance.group-id,Values=$EXISTING_SG_ID" "Name=instance-state-name,Values=running,pending,stopping,stopped,shutting-down" --query 'Reservations[*].Instances[*].InstanceId' --output text)
+        DEPENDENT_INSTANCES=$(aws ec2 describe-instances --filters "Name=instance.group-id,Values=$EXISTING_SG_ID" \
+            "Name=instance-state-name,Values=running,pending,stopping,stopped,shutting-down" \
+            --query 'Reservations[*].Instances[*].InstanceId' --output text)
         if [ -z "$DEPENDENT_INSTANCES" ]; then
             break
         fi
@@ -201,7 +198,8 @@ fi
 # 1. Create security group and configure ports
 echo "Creating new security group..."
 for i in 1 2 3; do
-    SG_ID=$(aws ec2 create-security-group --group-name ${SECURITY_GROUP_NAME} --description "Web Server security group" --query 'GroupId' --output text 2>/dev/null) && break
+    SG_ID=$(aws ec2 create-security-group --group-name ${SECURITY_GROUP_NAME} \
+        --description "Web Server security group" --query 'GroupId' --output text 2>/dev/null) && break
     echo " - Creation attempt $i failed, waiting ${i}0 seconds..."
     sleep $((i * 10))
     if [ $i -eq 3 ]; then
@@ -225,7 +223,8 @@ aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --po
 # 2. Create and configure SSH key pair
 echo "Creating new key pair..."
 for i in 1 2 3; do
-    if mkdir -p ~/.ssh && aws ec2 create-key-pair --key-name ${SSH_KEY_NAME} --query 'KeyMaterial' --output text > ~/.ssh/${SSH_KEY_NAME} 2>/dev/null; then
+    if mkdir -p ~/.ssh && aws ec2 create-key-pair --key-name ${SSH_KEY_NAME} \
+           --query 'KeyMaterial' --output text > ~/.ssh/${SSH_KEY_NAME} 2>/dev/null; then
         chmod 600 ~/.ssh/${SSH_KEY_NAME}
         echo " - Key pair created successfully"
         break
@@ -244,15 +243,10 @@ echo "Retrieving the latest Amazon Linux 2023 minimal AMI using SSM parameter...
 AMI_ID=$(aws ssm get-parameter --name "/aws/service/ami-amazon-linux-latest/al2023-ami-minimal-kernel-default-x86_64" --query "Parameter.Value" --output text)
 echo "Using AMI ID: $AMI_ID"
 echo "Creating instance..."
-INSTANCE_ID=$(aws ec2 run-instances \
-    --image-id "$AMI_ID" \
-    --count 1 \
-    --instance-type "$INSTANCE_TYPE" \
-    --key-name ${SSH_KEY_NAME} \
-    --security-group-ids "$SG_ID" \
+INSTANCE_ID=$(aws ec2 run-instances --image-id "$AMI_ID" --count 1 --instance-type "$INSTANCE_TYPE" \
+    --key-name ${SSH_KEY_NAME} --security-group-ids "$SG_ID" \
     --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${INSTANCE_TAG_NAME}}]" \
-    --query 'Instances[0].InstanceId' \
-    --output text)
+    --query 'Instances[0].InstanceId' --output text)
 if [ -z "$INSTANCE_ID" ]; then
     echo "Failed to create instance"
     exit 1
@@ -311,17 +305,13 @@ echo -e "\nSSH connection established!"
 ###########################################
 # Installation Phase
 ###########################################
-
 echo "Starting software installation..."
-#ssh -o StrictHostKeyChecking=no vm \
-ssh -o StrictHostKeyChecking=no -i ~/.ssh/key_WebServerAuto ec2-user@$ELASTIC_IP \
-"
-set -e
+ssh -o StrictHostKeyChecking=no -i ~/.ssh/${SSH_KEY_NAME} ec2-user@$ELASTIC_IP 'set -e
 
 #----------------
 # LAMP Stack
 #----------------
-if [ "$INSTALL_LAMP" = true ]; then
+if [ '"$INSTALL_LAMP"' = true ]; then
     echo "Updating DNF repositories..."
     sudo dnf clean all
     sudo dnf makecache
@@ -340,7 +330,7 @@ fi
 #----------------
 # SFTP Access
 #----------------
-if [ "$INSTALL_SFTP" = true ]; then
+if [ '"$INSTALL_SFTP"' = true ]; then
     echo "Enabling root login for SFTP..."
     sudo sed -i "/PermitRootLogin/c\PermitRootLogin yes" /etc/ssh/sshd_config
     sudo echo -e "tester\ntester" | sudo passwd root
@@ -350,7 +340,7 @@ fi
 #----------------
 # VS Code Server
 #----------------
-if [ "$INSTALL_VSCODE" = true ]; then
+if [ '"$INSTALL_VSCODE"' = true ]; then
     echo "Setting up VS Code Server..."
     # Insert VS Code Server installation commands here
 fi
@@ -358,12 +348,12 @@ fi
 #----------------
 # Database Tools
 #----------------
-if [ "$INSTALL_DB" = true ]; then
+if [ '"$INSTALL_DB"' = true ]; then
     echo "Installing Adminer..."
     sudo dnf install -y adminer
     echo "Configuring Adminer..."
     sudo ln -s /etc/adminer/conf.d/adminer.conf /etc/httpd/conf.d/adminer.conf || true
-    sudo mysql -Bse "CREATE USER IF NOT EXISTS admin@localhost IDENTIFIED BY 'password';GRANT ALL PRIVILEGES ON *.* TO admin@localhost;FLUSH PRIVILEGES;"
+    sudo mysql -Bse "CREATE USER IF NOT EXISTS admin@localhost IDENTIFIED BY '\''password'\'';GRANT ALL PRIVILEGES ON *.* TO admin@localhost;FLUSH PRIVILEGES;"
     sudo systemctl reload httpd
 
     echo "Installing phpMyAdmin..."
@@ -373,7 +363,7 @@ fi
 #----------------
 # WordPress
 #----------------
-if [ "$INSTALL_WORDPRESS" = true ]; then
+if [ '"$INSTALL_WORDPRESS"' = true ]; then
     echo "Installing WordPress..."
     echo "Installing wp-cli..."
     curl -O https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
@@ -387,7 +377,7 @@ if [ "$INSTALL_WORDPRESS" = true ]; then
     sudo dnf install -y php php-mysqlnd php-gd php-curl php-dom php-imagick php-mbstring php-zip php-intl
 
     echo "Configuring WordPress..."
-    sudo mysql -Bse "CREATE USER IF NOT EXISTS wordpressuser@localhost IDENTIFIED BY 'password';GRANT ALL PRIVILEGES ON *.* TO wordpressuser@localhost;FLUSH PRIVILEGES;"
+    sudo mysql -Bse "CREATE USER IF NOT EXISTS wordpressuser@localhost IDENTIFIED BY '\''password'\'';GRANT ALL PRIVILEGES ON *.* TO wordpressuser@localhost;FLUSH PRIVILEGES;"
     sudo -u apache wp config create --dbname=wordpress --dbuser=wordpressuser --dbpass=password --path=/var/www/html/
     wp db create --path=/var/www/html/
     sudo mysql -Bse "REVOKE ALL PRIVILEGES, GRANT OPTION FROM wordpressuser@localhost;GRANT ALL PRIVILEGES ON wordpress.* TO wordpressuser@localhost;FLUSH PRIVILEGES;"
@@ -409,7 +399,7 @@ fi
 #----------------
 # Matomo Analytics
 #----------------
-if [ "$INSTALL_MATOMO" = true ]; then
+if [ '"$INSTALL_MATOMO"' = true ]; then
     echo "Installing Matomo Analytics Server..."
     sudo dnf install -y unzip php-dom php-xml php-mbstring
     sudo systemctl restart httpd
@@ -418,11 +408,12 @@ if [ "$INSTALL_MATOMO" = true ]; then
     sudo chown -R apache:apache /var/www/html/matomo
     sudo rm -f /var/www/html/matomo.zip
     sudo rm -f /var/www/html/'How to install Matomo.html'
-    sudo mysql -Bse "CREATE DATABASE matomodb;CREATE USER matomoadmin@localhost IDENTIFIED BY 'password';GRANT ALL PRIVILEGES ON matomodb.* TO matomoadmin@localhost; FLUSH PRIVILEGES;"
+    sudo mysql -Bse "CREATE DATABASE matomodb;CREATE USER matomoadmin@localhost IDENTIFIED BY '\''password'\'';GRANT ALL PRIVILEGES ON matomodb.* TO matomoadmin@localhost; FLUSH PRIVILEGES;"
     sudo -u apache wp plugin install matomo --activate --path=/var/www/html/
     sudo -u apache wp plugin install wp-piwik --activate --path=/var/www/html/
     sudo -u apache wp plugin install super-progressive-web-apps --activate --path=/var/www/html/
 fi
+'
 
 ###########################################
 # Final Status Output
@@ -452,4 +443,3 @@ printf "\nYou can SSH into your new VM on this Cloud Shell using: \e[3;4;33mssh 
 echo "********************************"
 echo "* SUCCESS! - Script completed! *"
 echo "********************************"
-"
