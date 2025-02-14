@@ -318,9 +318,9 @@ if [ '"$INSTALL_LAMP"' = true ]; then
 
     echo "Installing LAMP stack..."
     sudo dnf install -y httpd 
-    MARIADB_LATEST_PACKAGE=$(dnf list available | grep -E "^mariadb[0-9]+-server" | awk "{print \$1}" | sort -V | tail -n 1)
-    sudo dnf install -y "$MARIADB_LATEST_PACKAGE"
-    sudo dnf install -y php
+    MARIADB_LATEST_PACKAGE=$(dnf list available | grep -E "^mariadb[0-9]+-server" | awk "{print \$1}" | sort -V | tail -n 1) 
+    sudo dnf install -y "$MARIADB_LATEST_PACKAGE" 
+    sudo dnf install -y php 
 
     echo "Configuring LAMP..."
     sudo sed -i.bak -e "s/DirectoryIndex index.html/DirectoryIndex index.php index.html/" /etc/httpd/conf/httpd.conf || true
@@ -328,7 +328,10 @@ if [ '"$INSTALL_LAMP"' = true ]; then
     sudo wget https://raw.githubusercontent.com/danielcregg/simple-php-website/main/index.php -P /var/www/html/
     sudo rm -f /var/www/html/index.html
     sudo chown -R apache:apache /var/www
-    sudo systemctl enable --now httpd
+    sudo systemctl enable httpd
+    sudo systemctl start httpd
+    sudo systemctl enable mariadb
+    sudo systemctl start mariadb
 fi
 
 #----------------
