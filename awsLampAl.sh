@@ -378,7 +378,7 @@ if [ '"$INSTALL_WORDPRESS"' = true ]; then
     sudo mv wp-cli.phar /usr/local/bin/wp
 
     echo "Downloading WordPress..."
-    sudo -u apache wp core download --path=/var/www/html/
+    sudo -u www-data wp core download --path=/var/www/html/
 
     echo "Installing required PHP modules for WordPress..."
     sudo dnf install -y php php-mysqlnd php-gd php-curl php-dom php-mbstring php-zip php-intl
