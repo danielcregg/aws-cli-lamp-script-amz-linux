@@ -420,7 +420,6 @@ if [ '"$INSTALL_MATOMO"' = true ]; then
     sudo -u apache wp plugin install wp-piwik --activate --path=/var/www/html/
     sudo -u apache wp plugin install super-progressive-web-apps --activate --path=/var/www/html/
 fi
-'
 
 ###########################################
 # Final Status Output
@@ -450,3 +449,4 @@ printf "\nYou can SSH into your new VM on this Cloud Shell using: \e[3;4;33mssh 
 echo "********************************"
 echo "* SUCCESS! - Script completed! *"
 echo "********************************"
+'
