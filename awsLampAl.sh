@@ -381,7 +381,7 @@ if [ '"$INSTALL_WORDPRESS"' = true ]; then
     sudo -u apache wp core download --path=/var/www/html/
 
     echo "Installing required PHP modules for WordPress..."
-    sudo dnf install -y php php-mysqlnd php-gd php-curl php-dom php-imagick php-mbstring php-zip php-intl
+    sudo dnf install -y php php-mysqlnd php-gd php-curl php-dom php-mbstring php-zip php-intl
 
     echo "Configuring WordPress..."
     sudo mysql -Bse "CREATE USER IF NOT EXISTS wordpressuser@localhost IDENTIFIED BY '\''password'\'';GRANT ALL PRIVILEGES ON *.* TO wordpressuser@localhost;FLUSH PRIVILEGES;"
