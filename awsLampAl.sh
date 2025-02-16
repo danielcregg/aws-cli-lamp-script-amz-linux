@@ -424,25 +424,25 @@ fi
 ###########################################
 # Final Status Output
 ###########################################
-if [ "$INSTALL_LAMP" = true ]; then
+if [ '$INSTALL_LAMP' = true ]; then
     printf "\nClick on this link to open your website: \e[3;4;33mhttp://$(curl -s ifconfig.me)\e[0m\n"
 fi
-if [ "$INSTALL_SFTP" = true ]; then
+if [ '$INSTALL_SFTP' = true ]; then
     printf "\nClick on this link to download WinSCP: \e[3;4;33mhttps://dcus.short.gy/downloadWinSCP\e[0m - Note: User name = root and password = tester\n"
 fi
-if [ "$INSTALL_VSCODE" = true ]; then
+if [ '$INSTALL_VSCODE' = true ]; then
     printf "\nSSH into your new VM (ssh vm) and run this command to open a VS Code tunnel: \e[3;4;33msudo code tunnel\e[0m\nFollow the instructions in the terminal to connect via your browser.\n"
     printf "\nYou can also access VS Code online by visiting: \e[3;4;33mhttp://$(curl -s ifconfig.me):8080\e[0m \n"
 fi
-if [ "$INSTALL_DB" = true ]; then    
+if [ '$INSTALL_DB' = true ]; then    
     printf "\nOpen an internet browser and go to: \e[3;4;33mhttp://$(curl -s ifconfig.me)/adminer/?username=admin\e[0m - Adminer Login page (username: admin, password: password)\n"
     printf "\nOpen an internet browser and go to: \e[3;4;33mhttp://$(curl -s ifconfig.me)/phpmyadmin\e[0m - phpMyAdmin Login page (admin/password)\n"
 fi
-if [ "$INSTALL_WORDPRESS" = true ]; then
+if [ '$INSTALL_WORDPRESS' = true ]; then
     printf "\nOpen an internet browser and go to: \e[3;4;33mhttp://$(curl -s ifconfig.me)\e[0m - You should see the WordPress page.\n"
     printf "\nAccess the WordPress Dashboard at: \e[3;4;33mhttp://$(curl -s ifconfig.me)/wp-admin\e[0m (credentials: admin/password)\n"
 fi
-if [ "$INSTALL_MATOMO" = true ]; then
+if [ '$INSTALL_MATOMO' = true ]; then
     printf "\nOpen an internet browser and go to: \e[3;4;33mhttp://$(curl -s ifconfig.me)/matomo\e[0m - Matomo Install page.\n"
 fi
 printf "\nYou can SSH into your new VM on this Cloud Shell using: \e[3;4;33mssh vm\e[0m\n"
