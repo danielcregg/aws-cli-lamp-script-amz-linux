@@ -377,6 +377,9 @@ if [ '"$INSTALL_WORDPRESS"' = true ]; then
     chmod +x wp-cli.phar
     sudo mv wp-cli.phar /usr/local/bin/wp
 
+    echo "Creating cache for WordPress..."
+    sudo mkdir -p /usr/share/httpd/.wp-cli/cache
+    sudo chown -R apache:apache /usr/share/httpd/.wp-cli
     echo "Downloading WordPress..."
     sudo -u apache wp core download --path=/var/www/html/
 
