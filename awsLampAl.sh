@@ -181,16 +181,16 @@ else
     echo " - No existing instances found"
 fi
 
-# 3. Clean up security groups - renamed approach
-echo "3. Cleaning up security groups..."
+# 3. Checking for existing security groups...
 EXISTING_SG_ID=$(aws ec2 describe-security-groups --group-names ${SECURITY_GROUP_NAME} \
     --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null)
 if [ -n "$EXISTING_SG_ID" ] && [ "$EXISTING_SG_ID" != "None" ]; then
-    echo " - Found existing security group, will handle existing dependencies"
-    # We don't wait or delete here - we'll handle that at creation time
+    echo " - Found existing security group with ID: $EXISTING_SG_ID"
+    # Store the ID to reuse later
+    SG_ID=$EXISTING_SG_ID
+    echo " - Will reuse existing security group"
 else
     echo " - No existing security group found with name ${SECURITY_GROUP_NAME}"
-    EXISTING_SG_ID=""
 fi
 
 # 4. Clean up SSH keys
@@ -214,69 +214,87 @@ fi
 echo "Creating new key pair..."
 retry_command "aws ec2 create-key-pair --key-name ${SSH_KEY_NAME} --query 'KeyMaterial' --output text > ~/.ssh/${SSH_KEY_NAME} 2>/dev/null && chmod 600 ~/.ssh/${SSH_KEY_NAME}" "create SSH key pair" $MAX_RETRIES
 
-# 1. Create security group with consistent name
-echo "Creating security group ${SECURITY_GROUP_NAME}..."
-# First check if the old one still exists, if yes, try with -new suffix temporarily
-TEMP_SG_NAME="${SECURITY_GROUP_NAME}"
-if [ -n "$EXISTING_SG_ID" ]; then
-    echo " - Security group ${SECURITY_GROUP_NAME} exists, creating with temporary name..."
-    TEMP_SG_NAME="${SECURITY_GROUP_NAME}-new"
-fi
+# 1. Create or reuse security group
+if [ -n "$SG_ID" ]; then
+    echo "Reusing existing security group: $SG_ID"
+    echo " - Security group already exists, skipping creation"
+    # Optionally verify/update rules if needed
+    # The checks below will ensure the required ports are open
+    EXISTING_RULES=$(aws ec2 describe-security-groups --group-ids $SG_ID --query 'SecurityGroups[0].IpPermissions' --output json)
+else
+    echo "Creating security group ${SECURITY_GROUP_NAME}..."
+    # Create the security group with original name
+    SG_ID=$(aws ec2 create-security-group --group-name ${SECURITY_GROUP_NAME} \
+        --description "Web Server security group" --query 'GroupId' --output text 2>/dev/null)
 
-# Create the security group (either with original or temp name)
-SG_ID=$(aws ec2 create-security-group --group-name ${TEMP_SG_NAME} \
-    --description "Web Server security group" --query 'GroupId' --output text 2>/dev/null)
-
-if [ -z "$SG_ID" ]; then
-    echo " - First attempt failed, retrying with backoff..."
-    # Retry with exponential backoff
-    for i in $(seq 1 $MAX_RETRIES); do
-        wait_time=$((2 ** i))
-        echo " - Waiting ${wait_time} seconds before retry $i..."
-        sleep $wait_time
-        
-        SG_ID=$(aws ec2 create-security-group --group-name ${TEMP_SG_NAME} \
-            --description "Web Server security group" --query 'GroupId' --output text 2>/dev/null)
+    if [ -z "$SG_ID" ]; then
+        echo " - First attempt failed, retrying with backoff..."
+        # Retry with exponential backoff
+        for i in $(seq 1 $MAX_RETRIES); do
+            wait_time=$((2 ** i))
+            echo " - Waiting ${wait_time} seconds before retry $i..."
+            sleep $wait_time
             
-        if [ -n "$SG_ID" ]; then
-            echo " - Successfully created security group on attempt $i"
-            break
-        fi
-        
-        if [ $i -eq $MAX_RETRIES ]; then
-            echo "Failed to create security group after $MAX_RETRIES attempts. Exiting..."
-            exit 1
-        fi
-    done
+            SG_ID=$(aws ec2 create-security-group --group-name ${SECURITY_GROUP_NAME} \
+                --description "Web Server security group" --query 'GroupId' --output text 2>/dev/null)
+                
+            if [ -n "$SG_ID" ]; then
+                echo " - Successfully created security group on attempt $i"
+                break
+            fi
+            
+            if [ $i -eq $MAX_RETRIES ]; then
+                echo "Failed to create security group after $MAX_RETRIES attempts. Exiting..."
+                exit 1
+            fi
+        done
+    fi
+
+    echo "Successfully created security group: $SG_ID"
+    aws ec2 create-tags --resources "$SG_ID" --tags "Key=Name,Value=${SECURITY_GROUP_NAME}" > /dev/null
+    # For new security groups, we need to set permissions
+    EXISTING_RULES="[]"  # No rules yet
 fi
 
-echo "Successfully created security group: $SG_ID"
-aws ec2 create-tags --resources "$SG_ID" --tags "Key=Name,Value=${SECURITY_GROUP_NAME}" > /dev/null
+# Check and configure required ports - only add if they don't exist
+echo "Verifying required ports..."
 
-echo "Opening required ports..."
-echo " - Opening SSH (port 22)"
-aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 22 --cidr 0.0.0.0/0 > /dev/null
-echo " - Opening HTTP (port 80)"
-aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 80 --cidr 0.0.0.0/0 > /dev/null
-echo " - Opening HTTPS (port 443)"
-aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 3389 --cidr 0.0.0.0/0 > /dev/null
-echo " - Opening Code Server (port 8080)"
-aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 8080 --cidr 0.0.0.0/0 > /dev/null
+# Helper function to check if port is already open
+port_is_open() {
+    local port=$1
+    echo "$EXISTING_RULES" | grep -q "\"FromPort\": $port" && \
+    echo "$EXISTING_RULES" | grep -q "\"ToPort\": $port" && \
+    echo "$EXISTING_RULES" | grep -q "\"CidrIp\": \"0.0.0.0/0\""
+}
 
-# If we used a temporary name and original SG still exists, try to rename/swap back now
-if [ "$TEMP_SG_NAME" != "$SECURITY_GROUP_NAME" ] && [ -n "$EXISTING_SG_ID" ]; then
-    echo "Attempting to clean up the old security group to restore original name..."
-    # Try to delete the old security group (it might fail if still attached to instances)
-    if aws ec2 delete-security-group --group-id $EXISTING_SG_ID 2>/dev/null; then
-        echo " - Successfully deleted old security group"
-        # Try to rename our new security group to the original name
-        if aws ec2 create-tags --resources "$SG_ID" --tags "Key=Name,Value=${SECURITY_GROUP_NAME}" > /dev/null; then
-            echo " - Successfully restored original security group name"
-        fi
-    else
-        echo " - Could not delete old security group (likely still has dependencies)"
-        echo " - Will continue with new security group"
-    fi
+# Open SSH port if needed
+if ! port_is_open 22; then
+    echo " - Opening SSH (port 22)"
+    aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 22 --cidr 0.0.0.0/0 > /dev/null
+fi
+
+# Open HTTP port if needed
+if ! port_is_open 80; then
+    echo " - Opening HTTP (port 80)"
+    aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 80 --cidr 0.0.0.0/0 > /dev/null
+fi
+
+# Open HTTPS port if needed
+if ! port_is_open 443; then
+    echo " - Opening HTTPS (port 443)"
+    aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 443 --cidr 0.0.0.0/0 > /dev/null
+fi
+
+# Open RDP port if needed (port 3389, though labeled as HTTPS in your original script)
+if ! port_is_open 3389; then
+    echo " - Opening RDP (port 3389)"
+    aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 3389 --cidr 0.0.0.0/0 > /dev/null
+fi
+
+# Open Code Server port if needed
+if ! port_is_open 8080; then
+    echo " - Opening Code Server (port 8080)"
+    aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 8080 --cidr 0.0.0.0/0 > /dev/null
 fi
 
 # 3. Launch EC2 instance using Amazon Linux 2023 Minimal AMI
