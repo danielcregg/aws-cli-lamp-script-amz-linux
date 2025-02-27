@@ -17,7 +17,7 @@
 # Configuration Variables
 ###########################################
 TIMEOUT=120                    # Maximum wait time for instance startup (seconds)
-MAX_RETRIES=3                  # Maximum retry attempts for operations
+MAX_RETRIES=5                  # Maximum retry attempts for operations
 INSTANCE_TYPE="t2.medium"      # AWS instance type
 SSH_KEY_NAME="key_WebServerAuto"
 SECURITY_GROUP_NAME="webServerSecurityGroup"
@@ -48,6 +48,38 @@ wait_for_termination() {
     local resource_id="$1"
     local resource_type="$2"
     # ...existing status check code...
+}
+
+# Function to retry AWS commands with exponential backoff
+retry_command() {
+    local cmd=$1
+    local description=$2
+    local max_attempts=$3
+    local attempt=1
+    local output=""
+    local status=1
+    
+    echo "Attempting to $description..."
+    while [ $attempt -le $max_attempts ]; do
+        echo " - Attempt $attempt/$max_attempts"
+        output=$(eval "$cmd" 2>&1)
+        status=$?
+        
+        if [ $status -eq 0 ]; then
+            echo " - Success: $description"
+            echo "$output"
+            return 0
+        fi
+        
+        wait_time=$((2 ** ($attempt - 1) * 5))
+        echo " - Failed. Waiting ${wait_time} seconds before retrying..."
+        sleep $wait_time
+        attempt=$((attempt + 1))
+    done
+    
+    echo "Failed to $description after $max_attempts attempts. Exiting..."
+    echo "Last error: $output"
+    return 1
 }
 
 ###########################################
@@ -118,65 +150,35 @@ else
 fi
 
 # 2. Clean up EC2 instances
-echo "2. Cleaning up EC2 instances..."
+echo "2. Cleaning up EC2 instances..."  
 EXISTING_INSTANCE_IDS=$(aws ec2 describe-instances \
     --filters "Name=tag:Name,Values=${INSTANCE_TAG_NAME}" "Name=instance-state-name,Values=running,pending,stopping,stopped" \
     --query 'Reservations[*].Instances[*].InstanceId' --output text)
 if [ -n "$EXISTING_INSTANCE_IDS" ]; then
-    echo " - Found existing instances, terminating..."
-    aws ec2 terminate-instances --instance-ids $EXISTING_INSTANCE_IDS > /dev/null
-    echo " - Termination initiated for instances: $EXISTING_INSTANCE_IDS"
-    echo " - Waiting for instances to terminate..."
-    while true; do
-        STATUS=$(aws ec2 describe-instances --instance-ids $EXISTING_INSTANCE_IDS --query 'Reservations[*].Instances[*].[InstanceId,State.Name]' --output text)
-        echo -en "\r\033[K - Current status:"
-        while IFS=$'\t' read -r id state; do
-            printf " %s: %-15s" "$id" "$state"
-        done <<< "$STATUS"
-        if ! echo "$STATUS" | grep -qv "terminated"; then
-            echo -e "\n - All instances terminated successfully"
-            break
-        fi
-        for cursor in '/' '-' '\' '|'; do
-            echo -en "\b$cursor"
-            sleep 0.5
-        done
+    echo " - Found existing instances, renaming before termination..."
+    # Rename instances by adding "-deleting" suffix to avoid naming conflicts
+    for INSTANCE_ID in $EXISTING_INSTANCE_IDS; do
+        aws ec2 create-tags --resources "$INSTANCE_ID" --tags "Key=Name,Value=${INSTANCE_TAG_NAME}-deleting" > /dev/null
+        echo " - Renamed instance $INSTANCE_ID to ${INSTANCE_TAG_NAME}-deleting"
     done
+    
+    echo " - Initiating termination for instances: $EXISTING_INSTANCE_IDS"
+    aws ec2 terminate-instances --instance-ids $EXISTING_INSTANCE_IDS > /dev/null
+    echo " - Termination initiated, continuing with script execution..."
 else
     echo " - No existing instances found"
 fi
 
-# 3. Clean up security groups
+# 3. Clean up security groups - renamed approach
 echo "3. Cleaning up security groups..."
 EXISTING_SG_ID=$(aws ec2 describe-security-groups --group-names ${SECURITY_GROUP_NAME} \
     --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null)
 if [ -n "$EXISTING_SG_ID" ] && [ "$EXISTING_SG_ID" != "None" ]; then
-    echo " - Found existing security group, checking dependencies..."
-    while true; do
-        DEPENDENT_INSTANCES=$(aws ec2 describe-instances --filters "Name=instance.group-id,Values=$EXISTING_SG_ID" \
-            "Name=instance-state-name,Values=running,pending,stopping,stopped,shutting-down" \
-            --query 'Reservations[*].Instances[*].InstanceId' --output text)
-        if [ -z "$DEPENDENT_INSTANCES" ]; then
-            break
-        fi
-        echo " - Waiting for dependent instances to terminate..."
-        sleep 5
-    done
-    for i in 1 2 3; do
-        if aws ec2 delete-security-group --group-id $EXISTING_SG_ID 2>/dev/null; then
-            echo " - Security group deleted successfully"
-            break
-        else
-            if [ $i -eq 3 ]; then
-                echo "Failed to delete security group after 3 attempts. Please check AWS Console and try again."
-                exit 1
-            fi
-            echo " - Deletion attempt $i failed, waiting ${i}0 seconds..."
-            sleep $((i * 10))
-        fi
-    done
+    echo " - Found existing security group, will handle existing dependencies"
+    # We don't wait or delete here - we'll handle that at creation time
 else
-    echo " - No existing security group found"
+    echo " - No existing security group found with name ${SECURITY_GROUP_NAME}"
+    EXISTING_SG_ID=""
 fi
 
 # 4. Clean up SSH keys
@@ -186,6 +188,7 @@ if aws ec2 describe-key-pairs --key-name ${SSH_KEY_NAME} >/dev/null 2>&1; then
     aws ec2 delete-key-pair --key-name ${SSH_KEY_NAME} > /dev/null
     rm -f ~/.ssh/${SSH_KEY_NAME}* ~/.ssh/known_hosts* ~/.ssh/config
     echo " - Removed key pair and local SSH files"
+    # Brief pause to ensure AWS has processed the deletion
     sleep 2
 else
     echo " - No existing key pair found"
@@ -195,19 +198,49 @@ fi
 # Resource Creation Phase
 ###########################################
 
-# 1. Create security group and configure ports
-echo "Creating new security group..."
-for i in 1 2 3; do
-    SG_ID=$(aws ec2 create-security-group --group-name ${SECURITY_GROUP_NAME} \
-        --description "Web Server security group" --query 'GroupId' --output text 2>/dev/null) && break
-    echo " - Creation attempt $i failed, waiting ${i}0 seconds..."
-    sleep $((i * 10))
-    if [ $i -eq 3 ]; then
-        echo "Failed to create security group after 3 attempts. Exiting..."
-        exit 1
-    fi
-done
+# 2. Create and configure SSH key pair first (before security group)
+echo "Creating new key pair..."
+retry_command "aws ec2 create-key-pair --key-name ${SSH_KEY_NAME} --query 'KeyMaterial' --output text > ~/.ssh/${SSH_KEY_NAME} 2>/dev/null && chmod 600 ~/.ssh/${SSH_KEY_NAME}" "create SSH key pair" $MAX_RETRIES
+
+# 1. Create security group with consistent name
+echo "Creating security group ${SECURITY_GROUP_NAME}..."
+# First check if the old one still exists, if yes, try with -new suffix temporarily
+TEMP_SG_NAME="${SECURITY_GROUP_NAME}"
+if [ -n "$EXISTING_SG_ID" ]; then
+    echo " - Security group ${SECURITY_GROUP_NAME} exists, creating with temporary name..."
+    TEMP_SG_NAME="${SECURITY_GROUP_NAME}-new"
+fi
+
+# Create the security group (either with original or temp name)
+SG_ID=$(aws ec2 create-security-group --group-name ${TEMP_SG_NAME} \
+    --description "Web Server security group" --query 'GroupId' --output text 2>/dev/null)
+
+if [ -z "$SG_ID" ]; then
+    echo " - First attempt failed, retrying with backoff..."
+    # Retry with exponential backoff
+    for i in $(seq 1 $MAX_RETRIES); do
+        wait_time=$((2 ** i))
+        echo " - Waiting ${wait_time} seconds before retry $i..."
+        sleep $wait_time
+        
+        SG_ID=$(aws ec2 create-security-group --group-name ${TEMP_SG_NAME} \
+            --description "Web Server security group" --query 'GroupId' --output text 2>/dev/null)
+            
+        if [ -n "$SG_ID" ]; then
+            echo " - Successfully created security group on attempt $i"
+            break
+        fi
+        
+        if [ $i -eq $MAX_RETRIES ]; then
+            echo "Failed to create security group after $MAX_RETRIES attempts. Exiting..."
+            exit 1
+        fi
+    done
+fi
+
 echo "Successfully created security group: $SG_ID"
+aws ec2 create-tags --resources "$SG_ID" --tags "Key=Name,Value=${SECURITY_GROUP_NAME}" > /dev/null
+
 echo "Opening required ports..."
 echo " - Opening SSH (port 22)"
 aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 22 --cidr 0.0.0.0/0 > /dev/null
@@ -218,23 +251,21 @@ aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --po
 echo " - Opening Code Server (port 8080)"
 aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 8080 --cidr 0.0.0.0/0 > /dev/null
 
-# 2. Create and configure SSH key pair
-echo "Creating new key pair..."
-for i in 1 2 3; do
-    if mkdir -p ~/.ssh && aws ec2 create-key-pair --key-name ${SSH_KEY_NAME} \
-           --query 'KeyMaterial' --output text > ~/.ssh/${SSH_KEY_NAME} 2>/dev/null; then
-        chmod 600 ~/.ssh/${SSH_KEY_NAME}
-        echo " - Key pair created successfully"
-        break
-    else
-        if [ $i -eq 3 ]; then
-            echo "Failed to create key pair after 3 attempts. Exiting..."
-            exit 1
+# If we used a temporary name and original SG still exists, try to rename/swap back now
+if [ "$TEMP_SG_NAME" != "$SECURITY_GROUP_NAME" ] && [ -n "$EXISTING_SG_ID" ]; then
+    echo "Attempting to clean up the old security group to restore original name..."
+    # Try to delete the old security group (it might fail if still attached to instances)
+    if aws ec2 delete-security-group --group-id $EXISTING_SG_ID 2>/dev/null; then
+        echo " - Successfully deleted old security group"
+        # Try to rename our new security group to the original name
+        if aws ec2 create-tags --resources "$SG_ID" --tags "Key=Name,Value=${SECURITY_GROUP_NAME}" > /dev/null; then
+            echo " - Successfully restored original security group name"
         fi
-        echo " - Creation attempt $i failed, waiting ${i}0 seconds..."
-        sleep $((i * 10))
+    else
+        echo " - Could not delete old security group (likely still has dependencies)"
+        echo " - Will continue with new security group"
     fi
-done
+fi
 
 # 3. Launch EC2 instance using Amazon Linux 2023 Minimal AMI
 echo "Retrieving the latest Amazon Linux 2023 minimal AMI using SSM parameter..."
