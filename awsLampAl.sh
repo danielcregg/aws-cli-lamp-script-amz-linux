@@ -135,16 +135,28 @@ done
 printf "\e[3;4;31mStarting cleanup of AWS resources...\e[0m\n"
 
 # 1. Clean up Elastic IPs
-echo "1. Cleaning up Elastic IPs..."
+echo "1. Checking for existing Elastic IPs..."
 EXISTING_ELASTIC_IP_ALLOCATION_IDS=$(aws ec2 describe-tags \
     --filters "Name=key,Values=Name" "Name=value,Values=${ELASTIC_IP_TAG_NAME}" "Name=resource-type,Values=elastic-ip" \
     --query 'Tags[*].ResourceId' --output text)
 if [ -n "$EXISTING_ELASTIC_IP_ALLOCATION_IDS" ]; then
-    echo " - Found existing Elastic IPs, releasing..."
+    echo " - Found existing Elastic IPs, checking availability..."
+    # Get the first available (unallocated or at least not associated) Elastic IP
     for ALLOCATION_ID in $EXISTING_ELASTIC_IP_ALLOCATION_IDS; do
-        aws ec2 release-address --allocation-id $ALLOCATION_ID
-        echo " - Released Elastic IP with allocation ID: $ALLOCATION_ID"
+        ASSOCIATION_ID=$(aws ec2 describe-addresses --allocation-ids $ALLOCATION_ID --query 'Addresses[0].AssociationId' --output text)
+        if [ "$ASSOCIATION_ID" = "None" ] || [ -z "$ASSOCIATION_ID" ]; then
+            echo " - Found available Elastic IP with allocation ID: $ALLOCATION_ID"
+            REUSE_ALLOCATION_ID=$ALLOCATION_ID
+            break
+        fi
     done
+    # If no available IP found, release the first one to reuse
+    if [ -z "$REUSE_ALLOCATION_ID" ]; then
+        ALLOCATION_ID=$(echo $EXISTING_ELASTIC_IP_ALLOCATION_IDS | awk '{print $1}')
+        echo " - No available Elastic IPs found, releasing one to reuse..."
+        aws ec2 disassociate-address --allocation-id $ALLOCATION_ID > /dev/null 2>&1
+        REUSE_ALLOCATION_ID=$ALLOCATION_ID
+    fi
 else
     echo " - No existing Elastic IPs found"
 fi
@@ -304,10 +316,16 @@ while true; do
 done
 
 # 4. Configure Elastic IP
-echo "Allocating a new Elastic IP..."
-ALLOCATION_ID=$(aws ec2 allocate-address --domain vpc --query 'AllocationId' --output text)
-echo "Tagging Elastic IP..."
-aws ec2 create-tags --resources "$ALLOCATION_ID" --tags Key=Name,Value=${ELASTIC_IP_TAG_NAME}
+if [ -n "$REUSE_ALLOCATION_ID" ]; then
+    echo "Reusing existing Elastic IP..."
+    ALLOCATION_ID=$REUSE_ALLOCATION_ID
+else
+    echo "Allocating a new Elastic IP..."
+    ALLOCATION_ID=$(aws ec2 allocate-address --domain vpc --query 'AllocationId' --output text)
+    echo "Tagging Elastic IP..."
+    aws ec2 create-tags --resources "$ALLOCATION_ID" --tags Key=Name,Value=${ELASTIC_IP_TAG_NAME}
+fi
+
 echo "Getting Elastic IP address..."
 ELASTIC_IP=$(aws ec2 describe-addresses --allocation-ids "$ALLOCATION_ID" --query 'Addresses[0].PublicIp' --output text)
 echo "Associating Elastic IP with the new instance..."
