@@ -19,7 +19,8 @@
 TIMEOUT=120                    # Maximum wait time for instance startup (seconds)
 MAX_RETRIES=5                  # Maximum retry attempts for operations
 INSTANCE_TYPE="t2.medium"      # AWS instance type
-SSH_KEY_NAME="key_WebServerAuto"
+TIMESTAMP=$(date +%s)          # Add timestamp for unique resource names
+SSH_KEY_NAME="key_WebServerAuto_${TIMESTAMP}"
 SECURITY_GROUP_NAME="securityGroupWebServerAuto"
 INSTANCE_TAG_NAME="WebServerAuto"
 ELASTIC_IP_TAG_NAME="elasticIPWebServerAuto"
@@ -193,28 +194,45 @@ else
     echo " - No existing security group found with name ${SECURITY_GROUP_NAME}"
 fi
 
-# 4. Clean up SSH keys
-echo "4. Cleaning up SSH keys..."
-if aws ec2 describe-key-pairs --key-name ${SSH_KEY_NAME} >/dev/null 2>&1; then
-    echo " - Found existing key pair, removing..."
-    aws ec2 delete-key-pair --key-name ${SSH_KEY_NAME} > /dev/null
-    rm -f ~/.ssh/${SSH_KEY_NAME}* ~/.ssh/known_hosts* ~/.ssh/config
-    echo " - Removed key pair and local SSH files"
-    # Brief pause to ensure AWS has processed the deletion
-    sleep 2
-else
-    echo " - No existing key pair found"
+# 4. Managing SSH keys...
+echo "4. Managing SSH keys..."
+# Create .ssh directory with proper permissions if it doesn't exist
+if [ ! -d ~/.ssh ]; then
+    echo " - Creating ~/.ssh directory"
+    mkdir -p ~/.ssh
+    chmod 700 ~/.ssh
 fi
+
+# Check for existing known_hosts and config, remove if needed
+if [ -f ~/.ssh/known_hosts ]; then
+    rm -f ~/.ssh/known_hosts
+fi
+if [ -f ~/.ssh/config ]; then
+    rm -f ~/.ssh/config
+fi
+
+echo " - Will create a new SSH key with name: ${SSH_KEY_NAME}"
 
 ###########################################
 # Resource Creation Phase
 ###########################################
 
-# 2. Create and configure SSH key pair first (before security group)
-echo "Creating new key pair..."
-retry_command "aws ec2 create-key-pair --key-name ${SSH_KEY_NAME} --query 'KeyMaterial' --output text > ~/.ssh/${SSH_KEY_NAME} 2>/dev/null && chmod 600 ~/.ssh/${SSH_KEY_NAME}" "create SSH key pair" $MAX_RETRIES
+# 1. Create and configure SSH key pair
+echo "Creating new key pair: ${SSH_KEY_NAME}..."
+# Create temporary file for key
+KEY_FILE=$(mktemp)
+if aws ec2 create-key-pair --key-name ${SSH_KEY_NAME} --query 'KeyMaterial' --output text > $KEY_FILE 2>/dev/null; then
+    # Move the key to .ssh directory and set permissions
+    mv $KEY_FILE ~/.ssh/${SSH_KEY_NAME}
+    chmod 600 ~/.ssh/${SSH_KEY_NAME}
+    echo " - Key pair created successfully and stored at ~/.ssh/${SSH_KEY_NAME}"
+else
+    echo " - Failed to create key pair. Cleaning up..."
+    rm -f $KEY_FILE
+    exit 1
+fi
 
-# 1. Create or reuse security group
+# 2. Create or reuse security group
 if [ -n "$SG_ID" ]; then
     echo "Reusing existing security group: $SG_ID"
     echo " - Security group already exists, skipping creation"
@@ -353,6 +371,16 @@ echo "Host vm
     HostName $ELASTIC_IP
     User ec2-user
     IdentityFile ~/.ssh/${SSH_KEY_NAME}" > ~/.ssh/config
+chmod 600 ~/.ssh/config
+
+# Before SSH connection attempt, confirm key file exists
+if [ ! -f ~/.ssh/${SSH_KEY_NAME} ]; then
+    echo "Error: SSH key file not found at ~/.ssh/${SSH_KEY_NAME}"
+    exit 1
+fi
+
+# Display key file permissions for debugging
+ls -la ~/.ssh/${SSH_KEY_NAME}
 
 echo "Attempting to establish SSH connection..."
 count=0
