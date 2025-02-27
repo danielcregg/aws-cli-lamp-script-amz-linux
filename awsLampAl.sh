@@ -214,8 +214,6 @@ aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --po
 echo " - Opening HTTP (port 80)"
 aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 80 --cidr 0.0.0.0/0 > /dev/null
 echo " - Opening HTTPS (port 443)"
-aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 443 --cidr 0.0.0.0/0 > /dev/null
-echo " - Opening RDP (port 3389)"
 aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 3389 --cidr 0.0.0.0/0 > /dev/null
 echo " - Opening Code Server (port 8080)"
 aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 8080 --cidr 0.0.0.0/0 > /dev/null
