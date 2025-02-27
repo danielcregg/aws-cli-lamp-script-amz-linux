@@ -20,8 +20,8 @@ TIMEOUT=120                    # Maximum wait time for instance startup (seconds
 MAX_RETRIES=5                  # Maximum retry attempts for operations
 INSTANCE_TYPE="t2.medium"      # AWS instance type
 SSH_KEY_NAME="key_WebServerAuto"
-SECURITY_GROUP_NAME="webServerSecurityGroup"
-INSTANCE_TAG_NAME="myWebServerAuto"
+SECURITY_GROUP_NAME="securityGroupWebServerAuto"
+INSTANCE_TAG_NAME="WebServerAuto"
 ELASTIC_IP_TAG_NAME="elasticIPWebServerAuto"
 
 # Feature flags
