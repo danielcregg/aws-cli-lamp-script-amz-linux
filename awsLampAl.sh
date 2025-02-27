@@ -478,6 +478,18 @@ if [ '"$INSTALL_WORDPRESS"' = true ]; then
 
     echo "Installing required PHP modules for WordPress..."
     sudo dnf install -y php php-mysqlnd php-gd php-curl php-dom php-mbstring php-zip php-intl
+    
+    # Modified ImageMagick approach - skip it entirely since it causes dependency issues
+    echo "Checking for WordPress image processing capabilities..."
+    if php -r "exit(function_exists('imagecreate') ? 0 : 1);" ; then
+        echo "GD library is available for image processing"
+    else
+        echo "Warning: GD library not detected - attempting to install"
+        sudo dnf install -y php-gd
+    fi
+    
+    echo "Note: ImageMagick extension is not being installed due to dependency conflicts"
+    echo "WordPress will use the GD library for image processing instead"
 
     echo "Configuring WordPress..."
     sudo mysql -Bse "CREATE USER IF NOT EXISTS wordpressuser@localhost IDENTIFIED BY '\''password'\'';GRANT ALL PRIVILEGES ON *.* TO wordpressuser@localhost;FLUSH PRIVILEGES;"
@@ -497,6 +509,10 @@ if [ '"$INSTALL_WORDPRESS"' = true ]; then
     sudo -u apache wp plugin list --status=inactive --field=name --path=/var/www/html/ | xargs --replace=% sudo -u apache wp plugin delete % --path=/var/www/html/
     sudo -u apache wp theme list --status=inactive --field=name --path=/var/www/html/ | xargs --replace=% sudo -u apache wp theme delete % --path=/var/www/html/
     sudo -u apache wp plugin install all-in-one-wp-migration --activate --path=/var/www/html/
+    
+    # Add theme update functionality
+    echo "Updating WordPress themes..."
+    sudo -u apache wp theme update --all --path=/var/www/html/
 fi
 
 #----------------
