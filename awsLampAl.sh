@@ -315,9 +315,9 @@ if ! port_is_open 8080; then
     aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 8080 --cidr 0.0.0.0/0 > /dev/null
 fi
 
-# 3. Launch EC2 instance using Amazon Linux 2023 Minimal AMI
-echo "Retrieving the latest Amazon Linux 2023 minimal AMI using SSM parameter..."
-AMI_ID=$(aws ssm get-parameter --name "/aws/service/ami-amazon-linux-latest/al2023-ami-minimal-kernel-default-x86_64" --query "Parameter.Value" --output text)
+# 3. Launch EC2 instance using standard Amazon Linux 2023 AMI
+echo "Retrieving the latest Amazon Linux 2023 AMI using SSM parameter..."
+AMI_ID=$(aws ssm get-parameter --name "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64" --query "Parameter.Value" --output text)
 echo "Using AMI ID: $AMI_ID"
 echo "Creating instance..."
 INSTANCE_ID=$(aws ec2 run-instances --image-id "$AMI_ID" --count 1 --instance-type "$INSTANCE_TYPE" \
@@ -479,6 +479,21 @@ if [ '"$INSTALL_WORDPRESS"' = true ]; then
 
     echo "Installing required PHP modules for WordPress..."
     sudo dnf install -y php php-mysqlnd php-gd php-curl php-dom php-mbstring php-zip php-intl
+    
+    # Install PHP Imagick module which is recommended for WordPress image processing
+    echo "Installing PHP Imagick module..."
+    # Standard Amazon Linux 2023 should have these packages available
+    sudo dnf install -y ImageMagick ImageMagick-devel
+    # Try to install from package first
+    sudo dnf install -y php-pecl-imagick || {
+        echo "Simple package installation failed, trying to use PECL..."
+        sudo dnf install -y php-pear php-devel gcc make
+        # Use yes command to automatically accept defaults during installation
+        yes | sudo pecl install imagick
+        echo "extension=imagick.so" | sudo tee /etc/php.d/20-imagick.ini
+    }
+    sudo systemctl restart httpd
+    echo "PHP Imagick module installation completed"
 
     echo "Configuring WordPress..."
     sudo mysql -Bse "CREATE USER IF NOT EXISTS wordpressuser@localhost IDENTIFIED BY '\''password'\'';GRANT ALL PRIVILEGES ON *.* TO wordpressuser@localhost;FLUSH PRIVILEGES;"
