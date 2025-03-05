@@ -322,6 +322,7 @@ echo "Using AMI ID: $AMI_ID"
 echo "Creating instance..."
 INSTANCE_ID=$(aws ec2 run-instances --image-id "$AMI_ID" --count 1 --instance-type "$INSTANCE_TYPE" \
     --key-name ${SSH_KEY_NAME} --security-group-ids "$SG_ID" \
+    --block-device-mappings '[{"DeviceName":"/dev/xvda","Ebs":{"VolumeSize":10,"VolumeType":"gp3"}}]' \
     --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${INSTANCE_TAG_NAME}}]" \
     --query 'Instances[0].InstanceId' --output text)
 if [ -z "$INSTANCE_ID" ]; then
@@ -478,18 +479,6 @@ if [ '"$INSTALL_WORDPRESS"' = true ]; then
 
     echo "Installing required PHP modules for WordPress..."
     sudo dnf install -y php php-mysqlnd php-gd php-curl php-dom php-mbstring php-zip php-intl
-    
-    # Modified ImageMagick approach - skip it entirely since it causes dependency issues
-    echo "Checking for WordPress image processing capabilities..."
-    if php -r "exit(function_exists('imagecreate') ? 0 : 1);" ; then
-        echo "GD library is available for image processing"
-    else
-        echo "Warning: GD library not detected - attempting to install"
-        sudo dnf install -y php-gd
-    fi
-    
-    echo "Note: ImageMagick extension is not being installed due to dependency conflicts"
-    echo "WordPress will use the GD library for image processing instead"
 
     echo "Configuring WordPress..."
     sudo mysql -Bse "CREATE USER IF NOT EXISTS wordpressuser@localhost IDENTIFIED BY '\''password'\'';GRANT ALL PRIVILEGES ON *.* TO wordpressuser@localhost;FLUSH PRIVILEGES;"
