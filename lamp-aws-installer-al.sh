@@ -505,13 +505,6 @@ if [ '"$INSTALL_WORDPRESS"' = true ]; then
     sudo dnf install -y php php-mysqlnd php-gd php-curl php-dom php-mbstring php-zip php-intl
     
     # Install PHP Imagick module which is recommended for WordPress image processing
-    
-    # Check if module is loaded
-    if php -m | grep -q imagick; then
-        echo "PHP Imagick module installed successfully"
-    else
-        echo "Note: PHP Imagick module might not be available. WordPress will still function, but some image operations may be limited."
-    fi
 
     echo "Configuring WordPress..."
     sudo mysql -Bse "CREATE USER IF NOT EXISTS wordpressuser@localhost IDENTIFIED BY '\''password'\'';GRANT ALL PRIVILEGES ON *.* TO wordpressuser@localhost;FLUSH PRIVILEGES;"
