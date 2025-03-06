@@ -505,18 +505,6 @@ if [ '"$INSTALL_WORDPRESS"' = true ]; then
     sudo dnf install -y php php-mysqlnd php-gd php-curl php-dom php-mbstring php-zip php-intl
     
     # Install PHP Imagick module which is recommended for WordPress image processing
-    echo "Installing PHP Imagick module..."
-    sudo dnf install -y ImageMagick ImageMagick-devel
-    sudo dnf install -y php-pear php-devel gcc make
-    
-    # Install imagick using PECL with automatic acceptance
-    yes "" | sudo pecl install imagick || echo "PECL installation had warnings but may have succeeded"
-    
-    # Create the configuration file (even if PECL reported warnings)
-    echo "extension=imagick.so" | sudo tee /etc/php.d/20-imagick.ini
-    
-    # Restart Apache to load the new module
-    sudo systemctl restart httpd
     
     # Check if module is loaded
     if php -m | grep -q imagick; then
