@@ -480,20 +480,36 @@ if [ '"$INSTALL_WORDPRESS"' = true ]; then
     echo "Installing required PHP modules for WordPress..."
     sudo dnf install -y php php-mysqlnd php-gd php-curl php-dom php-mbstring php-zip php-intl
     
-    # Install PHP Imagick module which is recommended for WordPress image processing
-    echo "Installing PHP Imagick module..."
-    # Standard Amazon Linux 2023 should have these packages available
-    sudo dnf install -y ImageMagick ImageMagick-devel
-    # Try to install from package first
-    sudo dnf install -y php-pecl-imagick || {
-        echo "Simple package installation failed, trying to use PECL..."
-        sudo dnf install -y php-pear php-devel gcc make
-        # Use yes command to automatically accept defaults during installation
-        yes | sudo pecl install imagick
-        echo "extension=imagick.so" | sudo tee /etc/php.d/20-imagick.ini
-    }
-    sudo systemctl restart httpd
-    echo "PHP Imagick module installation completed"
+    # # Install PHP Imagick module which is recommended for WordPress image processing
+    # # Update system and install prerequisites
+    # sudo dnf check-release-update
+    # sudo dnf upgrade --releasever=latest -y
+    # sudo dnf install -y php-devel php-pear gcc ImageMagick ImageMagick-devel
+
+    # # Download, compile and install Imagick
+    # pecl download Imagick
+    # tar -xf imagick*.tgz
+    # cd imagick*
+    # phpize
+    # ./configure
+    # make
+    # sudo make install
+
+    # # Create configuration file
+    # echo "extension=imagick.so" | sudo tee /etc/php.d/25-imagick.ini > /dev/null
+
+    # # Restart PHP-FPM and Apache (if applicable)
+    # sudo systemctl restart php-fpm
+    # sudo systemctl restart httpd
+
+    # # Verify installation
+    # php -m | grep -i imagick
+
+    # # Clean up
+    # cd ..
+    # rm -rf imagick*
+
+    # echo "php-imagick installation complete!"
 
     echo "Configuring WordPress..."
     sudo mysql -Bse "CREATE USER IF NOT EXISTS wordpressuser@localhost IDENTIFIED BY '\''password'\'';GRANT ALL PRIVILEGES ON *.* TO wordpressuser@localhost;FLUSH PRIVILEGES;"
