@@ -506,6 +506,36 @@ if [ '"$INSTALL_WORDPRESS"' = true ]; then
     sudo dnf install -y php php-mysqlnd php-gd php-curl php-dom php-mbstring php-zip php-intl
     
     # Install PHP Imagick module which is recommended for WordPress image processing
+    # Update system and install prerequisites
+    sudo dnf check-release-update
+    sudo dnf upgrade --releasever=latest -y
+    sudo dnf install -y php-devel php-pear gcc ImageMagick ImageMagick-devel
+
+    # Download, compile and install Imagick
+    pecl download Imagick
+    tar -xf imagick*.tgz
+    IMAGICK_DIR=$(find . -type d -name "imagick*" | head -1)
+    cd "$IMAGICK_DIR"
+    phpize
+    ./configure
+    make
+    sudo make install
+
+    # Create configuration file
+    echo "extension=imagick.so" | sudo tee /etc/php.d/25-imagick.ini > /dev/null
+
+    # Restart PHP-FPM and Apache (if applicable)
+    sudo systemctl restart php-fpm
+    sudo systemctl restart httpd
+
+    # Verify installation
+    php -m | grep -i imagick
+
+    # Clean up
+    cd ..
+    rm -rf imagick*
+
+    echo "php-imagick installation complete!"
 
     echo "Configuring WordPress..."
     sudo mysql -Bse "CREATE USER IF NOT EXISTS wordpressuser@localhost IDENTIFIED BY '\''password'\'';GRANT ALL PRIVILEGES ON *.* TO wordpressuser@localhost;FLUSH PRIVILEGES;"
