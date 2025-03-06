@@ -19,8 +19,8 @@
 TIMEOUT=120                    # Maximum wait time for instance startup (seconds)
 MAX_RETRIES=5                  # Maximum retry attempts for operations
 INSTANCE_TYPE="t2.medium"      # AWS instance type
-TIMESTAMP=$(date +%s)          # Add timestamp for unique resource names
-SSH_KEY_NAME="key_WebServerAuto_${TIMESTAMP}"
+
+SSH_KEY_NAME="keyWebServerAuto"  
 SECURITY_GROUP_NAME="securityGroupWebServerAuto"
 INSTANCE_TAG_NAME="WebServerAuto"
 ELASTIC_IP_TAG_NAME="elasticIPWebServerAuto"
@@ -211,25 +211,49 @@ if [ -f ~/.ssh/config ]; then
     rm -f ~/.ssh/config
 fi
 
-echo " - Will create a new SSH key with name: ${SSH_KEY_NAME}"
+# Check for existing key pair with the same name
+KEY_EXISTS=$(aws ec2 describe-key-pairs --key-names ${SSH_KEY_NAME} --query 'KeyPairs[0].KeyName' --output text 2>/dev/null)
+if [ "$KEY_EXISTS" = "${SSH_KEY_NAME}" ]; then
+    echo " - Found existing key pair with name: ${SSH_KEY_NAME}"
+    # Check if the private key file exists locally
+    if [ -f ~/.ssh/${SSH_KEY_NAME} ]; then
+        echo " - Found local private key file, will reuse it"
+        REUSE_KEY=true
+    else
+        echo " - Local private key file not found, deleting remote key pair to recreate"
+        aws ec2 delete-key-pair --key-name ${SSH_KEY_NAME}
+        REUSE_KEY=false
+    fi
+else
+    echo " - No existing key pair found with name: ${SSH_KEY_NAME}"
+    REUSE_KEY=false
+fi
+
+echo " - Will use SSH key with name: ${SSH_KEY_NAME}"
 
 ###########################################
 # Resource Creation Phase
 ###########################################
 
 # 1. Create and configure SSH key pair
-echo "Creating new key pair: ${SSH_KEY_NAME}..."
-# Create temporary file for key
-KEY_FILE=$(mktemp)
-if aws ec2 create-key-pair --key-name ${SSH_KEY_NAME} --query 'KeyMaterial' --output text > $KEY_FILE 2>/dev/null; then
-    # Move the key to .ssh directory and set permissions
-    mv $KEY_FILE ~/.ssh/${SSH_KEY_NAME}
+if [ "$REUSE_KEY" = true ]; then
+    echo "Reusing existing key pair: ${SSH_KEY_NAME}..."
+    # Make sure the permissions are correct
     chmod 600 ~/.ssh/${SSH_KEY_NAME}
-    echo " - Key pair created successfully and stored at ~/.ssh/${SSH_KEY_NAME}"
 else
-    echo " - Failed to create key pair. Cleaning up..."
-    rm -f $KEY_FILE
-    exit 1
+    echo "Creating new key pair: ${SSH_KEY_NAME}..."
+    # Create temporary file for key
+    KEY_FILE=$(mktemp)
+    if aws ec2 create-key-pair --key-name ${SSH_KEY_NAME} --query 'KeyMaterial' --output text > $KEY_FILE 2>/dev/null; then
+        # Move the key to .ssh directory and set permissions
+        mv $KEY_FILE ~/.ssh/${SSH_KEY_NAME}
+        chmod 600 ~/.ssh/${SSH_KEY_NAME}
+        echo " - Key pair created successfully and stored at ~/.ssh/${SSH_KEY_NAME}"
+    else
+        echo " - Failed to create key pair. Cleaning up..."
+        rm -f $KEY_FILE
+        exit 1
+    fi
 fi
 
 # 2. Create or reuse security group
@@ -480,36 +504,26 @@ if [ '"$INSTALL_WORDPRESS"' = true ]; then
     echo "Installing required PHP modules for WordPress..."
     sudo dnf install -y php php-mysqlnd php-gd php-curl php-dom php-mbstring php-zip php-intl
     
-    # # Install PHP Imagick module which is recommended for WordPress image processing
-    # # Update system and install prerequisites
-    # sudo dnf check-release-update
-    # sudo dnf upgrade --releasever=latest -y
-    # sudo dnf install -y php-devel php-pear gcc ImageMagick ImageMagick-devel
-
-    # # Download, compile and install Imagick
-    # pecl download Imagick
-    # tar -xf imagick*.tgz
-    # cd imagick*
-    # phpize
-    # ./configure
-    # make
-    # sudo make install
-
-    # # Create configuration file
-    # echo "extension=imagick.so" | sudo tee /etc/php.d/25-imagick.ini > /dev/null
-
-    # # Restart PHP-FPM and Apache (if applicable)
-    # sudo systemctl restart php-fpm
-    # sudo systemctl restart httpd
-
-    # # Verify installation
-    # php -m | grep -i imagick
-
-    # # Clean up
-    # cd ..
-    # rm -rf imagick*
-
-    # echo "php-imagick installation complete!"
+    # Install PHP Imagick module which is recommended for WordPress image processing
+    echo "Installing PHP Imagick module..."
+    sudo dnf install -y ImageMagick ImageMagick-devel
+    sudo dnf install -y php-pear php-devel gcc make
+    
+    # Install imagick using PECL with automatic acceptance
+    yes "" | sudo pecl install imagick || echo "PECL installation had warnings but may have succeeded"
+    
+    # Create the configuration file (even if PECL reported warnings)
+    echo "extension=imagick.so" | sudo tee /etc/php.d/20-imagick.ini
+    
+    # Restart Apache to load the new module
+    sudo systemctl restart httpd
+    
+    # Check if module is loaded
+    if php -m | grep -q imagick; then
+        echo "PHP Imagick module installed successfully"
+    else
+        echo "Note: PHP Imagick module might not be available. WordPress will still function, but some image operations may be limited."
+    fi
 
     echo "Configuring WordPress..."
     sudo mysql -Bse "CREATE USER IF NOT EXISTS wordpressuser@localhost IDENTIFIED BY '\''password'\'';GRANT ALL PRIVILEGES ON *.* TO wordpressuser@localhost;FLUSH PRIVILEGES;"
