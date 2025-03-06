@@ -432,8 +432,8 @@ ssh -o StrictHostKeyChecking=no -i ~/.ssh/${SSH_KEY_NAME} ec2-user@$ELASTIC_IP '
 #----------------
 if [ '"$INSTALL_LAMP"' = true ]; then
     echo "Updating DNF repositories..."
-    sudo dnf clean all
-    sudo dnf makecache
+    sudo dnf clean all --quiet
+    sudo dnf makecache --quiet
 
     echo "Installing LAMP stack..."
     sudo dnf install -y httpd 
