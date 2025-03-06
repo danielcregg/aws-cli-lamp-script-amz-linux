@@ -348,6 +348,7 @@ INSTANCE_ID=$(aws ec2 run-instances --image-id "$AMI_ID" --count 1 --instance-ty
     --key-name ${SSH_KEY_NAME} --security-group-ids "$SG_ID" \
     --block-device-mappings '[{"DeviceName":"/dev/xvda","Ebs":{"VolumeSize":10,"VolumeType":"gp3"}}]' \
     --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${INSTANCE_TAG_NAME}}]" \
+                        "ResourceType=volume,Tags=[{Key=Name,Value=volWebServerAuto}]" \
     --query 'Instances[0].InstanceId' --output text)
 if [ -z "$INSTANCE_ID" ]; then
     echo "Failed to create instance"
