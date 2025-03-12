@@ -21,7 +21,7 @@ MAX_RETRIES=5                  # Maximum retry attempts for operations
 INSTANCE_TYPE="t2.medium"      # AWS instance type
 
 SSH_KEY_NAME="keyWebServerAuto"  
-SECURITY_GROUP_NAME="securityGroupWebServerAuto"
+SECURITY_GROUP_NAME="sgWebServerAuto"
 INSTANCE_TAG_NAME="WebServerAuto"
 ELASTIC_IP_TAG_NAME="elasticIPWebServerAuto"
 
