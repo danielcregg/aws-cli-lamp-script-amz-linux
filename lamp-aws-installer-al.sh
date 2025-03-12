@@ -327,12 +327,6 @@ if ! port_is_open 443; then
     aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 443 --cidr 0.0.0.0/0 > /dev/null
 fi
 
-# Open RDP port if needed (port 3389, though labeled as HTTPS in your original script)
-if ! port_is_open 3389; then
-    echo " - Opening RDP (port 3389)"
-    aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 3389 --cidr 0.0.0.0/0 > /dev/null
-fi
-
 # Open Code Server port if needed
 if ! port_is_open 8080; then
     echo " - Opening Code Server (port 8080)"
