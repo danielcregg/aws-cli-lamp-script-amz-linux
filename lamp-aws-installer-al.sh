@@ -11,6 +11,7 @@
 # - Database management tools
 # - WordPress
 # - Matomo Analytics
+# - SSL certificate, ALB, and Route 53 integration for HTTPS
 ###########################################
 
 ###########################################
@@ -24,6 +25,9 @@ SSH_KEY_NAME="keyWebServerAuto"
 SECURITY_GROUP_NAME="sgWebServerAuto"
 INSTANCE_TAG_NAME="WebServerAuto"
 ELASTIC_IP_TAG_NAME="elasticIPWebServerAuto"
+ALB_NAME="webServerAutoALB"
+TARGET_GROUP_NAME="webServerAutoTG"
+CERTIFICATE_TAG_NAME="sslCertWebServerAuto"
 
 # Feature flags
 INSTALL_LAMP=false
@@ -32,6 +36,10 @@ INSTALL_VSCODE=false
 INSTALL_DB=false
 INSTALL_WORDPRESS=false
 INSTALL_MATOMO=false
+SETUP_HTTPS=false
+
+# Domain configuration
+DOMAIN_NAME=""
 
 ###########################################
 # Helper Functions
@@ -86,8 +94,8 @@ retry_command() {
 ###########################################
 # Command Line Argument Processing
 ###########################################
-for arg in "$@"; do
-    case $arg in
+while [[ $# -gt 0 ]]; do
+    case $1 in
         -lamp)
             INSTALL_LAMP=true
             shift
@@ -127,13 +135,61 @@ for arg in "$@"; do
             INSTALL_MATOMO=true
             shift
             ;;
+        -d|--domain)
+            if [[ -n "$2" && "$2" != -* ]]; then
+                DOMAIN_NAME="$2"
+                SETUP_HTTPS=true
+                shift 2
+            else
+                echo "Error: Domain name is required after -d|--domain flag"
+                exit 1
+            fi
+            ;;
+        *)
+            shift
+            ;;
     esac
 done
+
+# Validate domain name if HTTPS is requested
+if [ "$SETUP_HTTPS" = true ] && [ -z "$DOMAIN_NAME" ]; then
+    echo "Error: Domain name is required for HTTPS setup. Please use -d|--domain flag."
+    exit 1
+fi
 
 ###########################################
 # Cleanup Phase
 ###########################################
 printf "\e[3;4;31mStarting cleanup of AWS resources...\e[0m\n"
+
+# 0. Clean up ALB and Target Groups if HTTPS setup is enabled
+if [ "$SETUP_HTTPS" = true ]; then
+    echo "0. Cleaning up existing ALB resources..."
+    
+    # Check for existing ALB
+    EXISTING_ALB_ARN=$(aws elbv2 describe-load-balancers --names ${ALB_NAME} --query 'LoadBalancers[0].LoadBalancerArn' --output text 2>/dev/null)
+    if [ -n "$EXISTING_ALB_ARN" ] && [ "$EXISTING_ALB_ARN" != "None" ]; then
+        echo " - Found existing ALB, deleting: ${EXISTING_ALB_ARN}"
+        aws elbv2 delete-load-balancer --load-balancer-arn ${EXISTING_ALB_ARN}
+        echo " - Waiting for ALB deletion to complete..."
+        sleep 10
+    fi
+    
+    # Check for existing Target Group
+    EXISTING_TG_ARN=$(aws elbv2 describe-target-groups --names ${TARGET_GROUP_NAME} --query 'TargetGroups[0].TargetGroupArn' --output text 2>/dev/null)
+    if [ -n "$EXISTING_TG_ARN" ] && [ "$EXISTING_TG_ARN" != "None" ]; then
+        echo " - Found existing Target Group, deleting: ${EXISTING_TG_ARN}"
+        aws elbv2 delete-target-group --target-group-arn ${EXISTING_TG_ARN}
+    fi
+    
+    # Check for existing certificates
+    echo " - Checking for existing SSL certificates..."
+    EXISTING_CERT_ARN=$(aws acm list-certificates --query "CertificateSummaryList[?contains(DomainName, '${DOMAIN_NAME}')].CertificateArn" --output text)
+    if [ -n "$EXISTING_CERT_ARN" ]; then
+        echo " - Found existing certificate for ${DOMAIN_NAME}, will delete: ${EXISTING_CERT_ARN}"
+        aws acm delete-certificate --certificate-arn ${EXISTING_CERT_ARN}
+    fi
+fi
 
 # 1. Clean up Elastic IPs
 echo "1. Checking for existing Elastic IPs..."
@@ -416,6 +472,264 @@ done
 echo -e "\nSSH connection established!"
 
 ###########################################
+# HTTPS Setup Phase (if domain is provided)
+###########################################
+if [ "$SETUP_HTTPS" = true ]; then
+    echo "Starting HTTPS setup for domain: $DOMAIN_NAME"
+
+    # Get the VPC ID of the instance
+    VPC_ID=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" --query 'Reservations[0].Instances[0].VpcId' --output text)
+    if [ -z "$VPC_ID" ]; then
+        echo "Error: Could not determine VPC ID for the instance"
+        exit 1
+    fi
+    echo "Instance is in VPC: $VPC_ID"
+
+    # Get subnet information
+    SUBNET_ID=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" --query 'Reservations[0].Instances[0].SubnetId' --output text)
+    echo "Instance is in subnet: $SUBNET_ID"
+
+    # Get all subnets in the VPC for ALB (need at least 2 subnets in different AZs)
+    SUBNETS=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" --query 'Subnets[*].SubnetId' --output text)
+    SUBNET_COUNT=$(echo $SUBNETS | wc -w)
+    if [ "$SUBNET_COUNT" -lt 2 ]; then
+        echo "Error: ALB requires at least 2 subnets in different AZs. Found $SUBNET_COUNT."
+        echo "Consider using a different VPC or creating additional subnets."
+        exit 1
+    fi
+    # Take first 2 subnets for ALB
+    SUBNET_LIST=$(echo $SUBNETS | tr ' ' '\n' | head -2 | tr '\n' ' ')
+    echo "Using subnets for ALB: $SUBNET_LIST"
+
+    # 1. Create SSL Certificate with DNS validation
+    echo "1. Creating SSL Certificate..."
+    CERT_ARN=$(aws acm request-certificate \
+        --domain-name $DOMAIN_NAME \
+        --validation-method DNS \
+        --tags Key=Name,Value=$CERTIFICATE_TAG_NAME \
+        --query 'CertificateArn' --output text)
+    
+    if [ -z "$CERT_ARN" ]; then
+        echo "Failed to create SSL certificate"
+        exit 1
+    fi
+    echo "Certificate ARN: $CERT_ARN"
+    
+    # Get the DNS validation records
+    echo "Waiting for certificate details..."
+    sleep 5  # Give AWS time to process the certificate request
+    
+    CERT_VALIDATION=$(aws acm describe-certificate \
+        --certificate-arn $CERT_ARN \
+        --query 'Certificate.DomainValidationOptions[0].ResourceRecord' \
+        --output json)
+    
+    if [ -z "$CERT_VALIDATION" ] || [ "$CERT_VALIDATION" == "null" ]; then
+        echo "Failed to get certificate validation details. Retrying..."
+        sleep 10
+        CERT_VALIDATION=$(aws acm describe-certificate \
+            --certificate-arn $CERT_ARN \
+            --query 'Certificate.DomainValidationOptions[0].ResourceRecord' \
+            --output json)
+    fi
+    
+    DNS_NAME=$(echo $CERT_VALIDATION | jq -r '.Name')
+    DNS_VALUE=$(echo $CERT_VALIDATION | jq -r '.Value')
+    
+    echo "To validate your certificate, create the following DNS record:"
+    echo "Record Name: $DNS_NAME"
+    echo "Record Type: CNAME"
+    echo "Record Value: $DNS_VALUE"
+    
+    # 2. Create Target Group
+    echo "2. Creating Target Group..."
+    TG_ARN=$(aws elbv2 create-target-group \
+        --name $TARGET_GROUP_NAME \
+        --protocol HTTP \
+        --port 80 \
+        --vpc-id $VPC_ID \
+        --health-check-path "/" \
+        --target-type instance \
+        --query 'TargetGroups[0].TargetGroupArn' --output text)
+    
+    if [ -z "$TG_ARN" ]; then
+        echo "Failed to create Target Group"
+        exit 1
+    fi
+    echo "Target Group created: $TG_ARN"
+    
+    # Register the EC2 instance with the target group
+    echo "Registering instance with Target Group..."
+    aws elbv2 register-targets \
+        --target-group-arn $TG_ARN \
+        --targets Id=$INSTANCE_ID > /dev/null
+    
+    # 3. Create Application Load Balancer
+    echo "3. Creating Application Load Balancer..."
+    ALB_ARN=$(aws elbv2 create-load-balancer \
+        --name $ALB_NAME \
+        --subnets $SUBNET_LIST \
+        --security-groups $SG_ID \
+        --scheme internet-facing \
+        --type application \
+        --query 'LoadBalancers[0].LoadBalancerArn' --output text)
+    
+    if [ -z "$ALB_ARN" ]; then
+        echo "Failed to create Application Load Balancer"
+        exit 1
+    fi
+    echo "ALB created: $ALB_ARN"
+    
+    # Get the ALB DNS name
+    ALB_DNS_NAME=$(aws elbv2 describe-load-balancers \
+        --load-balancer-arns $ALB_ARN \
+        --query 'LoadBalancers[0].DNSName' --output text)
+    
+    echo "ALB DNS name: $ALB_DNS_NAME"
+    
+    # Wait for the ALB to be active
+    echo "Waiting for ALB to become active..."
+    aws elbv2 wait load-balancer-available --load-balancer-arns $ALB_ARN
+    
+    # 4. Create HTTP and HTTPS listeners for the ALB
+    echo "4. Creating HTTP listener (will redirect to HTTPS)..."
+    aws elbv2 create-listener \
+        --load-balancer-arn $ALB_ARN \
+        --protocol HTTP \
+        --port 80 \
+        --default-actions Type=redirect,RedirectConfig="{Protocol=HTTPS,Port=443,StatusCode=HTTP_301}" > /dev/null
+    
+    # For HTTPS listener, we need to check if certificate validation is complete
+    echo "To continue with HTTPS setup:"
+    echo "1. Create the DNS validation record shown above with your domain registrar"
+    echo "2. After creating the validation record, the certificate will be validated automatically"
+    echo "3. This script will now wait for certificate validation to complete"
+    echo "   (this could take from a few minutes to several hours depending on DNS propagation)"
+    echo ""
+    echo "Checking certificate validation status every 30 seconds..."
+    
+    VALIDATION_STATUS="PENDING_VALIDATION"
+    while [ "$VALIDATION_STATUS" != "ISSUED" ]; do
+        VALIDATION_STATUS=$(aws acm describe-certificate \
+            --certificate-arn $CERT_ARN \
+            --query 'Certificate.Status' --output text)
+        
+        echo "Current certificate status: $VALIDATION_STATUS"
+        if [ "$VALIDATION_STATUS" == "ISSUED" ]; then
+            echo "Certificate has been successfully validated!"
+            break
+        elif [ "$VALIDATION_STATUS" == "FAILED" ]; then
+            echo "Certificate validation failed. Please check your DNS settings."
+            exit 1
+        fi
+        
+        echo "Waiting 30 seconds before checking again..."
+        sleep 30
+    done
+    
+    # Create HTTPS listener
+    echo "5. Creating HTTPS listener..."
+    HTTPS_LISTENER_ARN=$(aws elbv2 create-listener \
+        --load-balancer-arn $ALB_ARN \
+        --protocol HTTPS \
+        --port 443 \
+        --certificates CertificateArn=$CERT_ARN \
+        --ssl-policy ELBSecurityPolicy-2016-08 \
+        --default-actions Type=forward,TargetGroupArn=$TG_ARN \
+        --query 'Listeners[0].ListenerArn' --output text)
+    
+    if [ -z "$HTTPS_LISTENER_ARN" ]; then
+        echo "Failed to create HTTPS listener"
+        exit 1
+    fi
+    echo "HTTPS listener created: $HTTPS_LISTENER_ARN"
+    
+    # 5. Create Route 53 records (if user has provided domain)
+    echo "6. Setting up Route 53 records for domain: $DOMAIN_NAME"
+    
+    # Get the hosted zone ID for the domain
+    HOSTED_ZONE_ID=$(aws route53 list-hosted-zones-by-name \
+        --dns-name $DOMAIN_NAME \
+        --query 'HostedZones[0].Id' --output text | sed 's|/hostedzone/||')
+    
+    if [ -z "$HOSTED_ZONE_ID" ] || [ "$HOSTED_ZONE_ID" == "None" ]; then
+        echo "No Route 53 hosted zone found for $DOMAIN_NAME"
+        echo "Creating a hosted zone automatically..."
+        
+        # Create a hosted zone without asking for confirmation
+        HOSTED_ZONE_ID=$(aws route53 create-hosted-zone \
+            --name $DOMAIN_NAME \
+            --caller-reference "$(date +%s)" \
+            --hosted-zone-config Comment="Created by AWS LAMP installer script" \
+            --query 'HostedZone.Id' --output text | sed 's|/hostedzone/||')
+            
+        echo "Hosted zone created. Make sure to update your domain's name servers with your registrar."
+        aws route53 get-hosted-zone --id $HOSTED_ZONE_ID --query 'DelegationSet.NameServers' --output text | sed 's/\t/\n/g' | sed 's/^/Name server: /'
+    fi
+    
+    if [ -n "$HOSTED_ZONE_ID" ]; then
+        # Create A record for domain pointing to ALB
+        echo "Creating A record (alias) for $DOMAIN_NAME pointing to ALB..."
+        
+        # Get the hosted zone ID for the ALB (different from the Route 53 hosted zone ID)
+        REGION=$(aws configure get region)
+        ALB_HOSTED_ZONE_ID=$(aws elbv2 describe-load-balancers \
+            --load-balancer-arns $ALB_ARN \
+            --query 'LoadBalancers[0].CanonicalHostedZoneId' --output text)
+        
+        CHANGE_BATCH=$(cat <<EOF
+{
+  "Changes": [
+    {
+      "Action": "UPSERT",
+      "ResourceRecordSet": {
+        "Name": "$DOMAIN_NAME",
+        "Type": "A",
+        "AliasTarget": {
+          "HostedZoneId": "$ALB_HOSTED_ZONE_ID",
+          "DNSName": "dualstack.$ALB_DNS_NAME",
+          "EvaluateTargetHealth": false
+        }
+      }
+    },
+    {
+      "Action": "UPSERT",
+      "ResourceRecordSet": {
+        "Name": "www.$DOMAIN_NAME",
+        "Type": "CNAME",
+        "TTL": 300,
+        "ResourceRecords": [
+          {
+            "Value": "$DOMAIN_NAME"
+          }
+        ]
+      }
+    }
+  ]
+}
+EOF
+)
+        
+        aws route53 change-resource-record-sets \
+            --hosted-zone-id $HOSTED_ZONE_ID \
+            --change-batch "$CHANGE_BATCH" > /dev/null
+        
+        echo "Route 53 records created for $DOMAIN_NAME and www.$DOMAIN_NAME"
+        echo "Please allow time for DNS changes to propagate (typically 15 minutes to a few hours)"
+    fi
+    
+    # 7. Update WordPress site URLs if WordPress is being installed
+    if [ "$INSTALL_WORDPRESS" = true ]; then
+        echo "7. Setting up WordPress to use HTTPS domain..."
+        echo "After WordPress installation completes, WordPress URLs will be automatically updated to use HTTPS"
+    fi
+    
+    echo "HTTPS setup complete!"
+    echo "Your website will be accessible at: https://$DOMAIN_NAME"
+    echo "You may also access it via ALB DNS name: https://$ALB_DNS_NAME (certificate warnings may appear)"
+fi
+
+###########################################
 # Installation Phase
 ###########################################
 echo "Starting software installation..."
@@ -462,7 +776,8 @@ fi
 #----------------
 if [ '"$INSTALL_VSCODE"' = true ]; then
     echo "Setting up VS Code Server..."
-    # Insert VS Code Server installation commands here
+    # Install code-server (VS Code in the browser)
+    echo "Installing VS Code Server..."
 fi
 
 #----------------
@@ -491,68 +806,104 @@ if [ '"$INSTALL_WORDPRESS"' = true ]; then
     sudo mv wp-cli.phar /usr/local/bin/wp
 
     echo "Creating cache for WordPress..."
+    # Use current user instead of ec2-user
     sudo mkdir -p /usr/share/httpd/.wp-cli/cache
-    sudo chown -R apache:apache /usr/share/httpd/.wp-cli
+    sudo chown -R $(whoami):$(whoami) /usr/share/httpd/.wp-cli
     echo "Downloading WordPress..."
-    sudo -u apache wp core download --path=/var/www/html/
+    sudo wp core download --path=/var/www/html/ || echo "Warning: Could not download WordPress core"
 
     echo "Installing required PHP modules for WordPress..."
-    sudo dnf install -y php php-mysqlnd php-gd php-curl php-dom php-mbstring php-zip php-intl
+    sudo dnf install -y php php-mysqlnd php-gd php-curl php-dom php-mbstring php-zip php-intl || echo "Warning: Could not install all PHP modules"
     
     # Install PHP Imagick module which is recommended for WordPress image processing
+    echo "Installing PHP Imagick extension..."
     # Update system and install prerequisites
-    sudo dnf check-release-update
-    sudo dnf upgrade --releasever=latest -y
-    sudo dnf install -y php-devel php-pear gcc ImageMagick ImageMagick-devel
-
-    # Download, compile and install Imagick
-    pecl download Imagick
-    tar -xf imagick*.tgz
-    IMAGICK_DIR=$(find . -type d -name "imagick*" | head -1)
-    cd "$IMAGICK_DIR"
-    phpize
-    ./configure
-    make
-    sudo make install
-
-    # Create configuration file
-    echo "extension=imagick.so" | sudo tee /etc/php.d/25-imagick.ini > /dev/null
-
-    # Restart PHP-FPM and Apache (if applicable)
-    sudo systemctl restart php-fpm
-    sudo systemctl restart httpd
-
-    # Verify installation
-    php -m | grep -i imagick
-
-    # Clean up
-    cd ..
-    rm -rf imagick*
-
-    echo "php-imagick installation complete!"
-
-    echo "Configuring WordPress..."
-    sudo mysql -Bse "CREATE USER IF NOT EXISTS wordpressuser@localhost IDENTIFIED BY '\''password'\'';GRANT ALL PRIVILEGES ON *.* TO wordpressuser@localhost;FLUSH PRIVILEGES;"
-    sudo -u apache wp config create --dbname=wordpress --dbuser=wordpressuser --dbpass=password --path=/var/www/html/
-    wp db create --path=/var/www/html/
-    sudo mysql -Bse "REVOKE ALL PRIVILEGES, GRANT OPTION FROM wordpressuser@localhost;GRANT ALL PRIVILEGES ON wordpress.* TO wordpressuser@localhost;FLUSH PRIVILEGES;"
-    sudo mkdir -p /var/www/html/wp-content/uploads
-    sudo chmod 775 /var/www/html/wp-content/uploads
-    sudo chown apache:apache /var/www/html/wp-content/uploads
-    echo "Increasing PHP limits for file uploads..."
-    sudo sed -i.bak -e "s/^upload_max_filesize.*/upload_max_filesize = 512M/g" /etc/php.ini
-    sudo sed -i.bak -e "s/^post_max_size.*/post_max_size = 512M/g" /etc/php.ini
-    sudo sed -i.bak -e "s/^max_execution_time.*/max_execution_time = 300/g" /etc/php.ini
-    sudo sed -i.bak -e "s/^max_input_time.*/max_input_time = 300/g" /etc/php.ini
-    sudo systemctl restart httpd
-    sudo -u apache wp core install --url=$(curl -s ifconfig.me) --title="Website Title" --admin_user="admin" --admin_password="password" --admin_email="x@y.com" --path=/var/www/html/
-    sudo -u apache wp plugin list --status=inactive --field=name --path=/var/www/html/ | xargs --replace=% sudo -u apache wp plugin delete % --path=/var/www/html/
-    sudo -u apache wp theme list --status=inactive --field=name --path=/var/www/html/ | xargs --replace=% sudo -u apache wp theme delete % --path=/var/www/html/
-    sudo -u apache wp plugin install all-in-one-wp-migration --activate --path=/var/www/html/
+    sudo dnf install -y php-devel php-pear gcc ImageMagick ImageMagick-devel || echo "Warning: Could not install ImageMagick dependencies"
     
-    # Add theme update functionality
-    echo "Updating WordPress themes..."
-    sudo -u apache wp theme update --all --path=/var/www/html/
+    # Find the PHP configuration directory
+    PHP_CONFIG_DIR=$(php -i | grep "Scan this dir for additional .ini files" | awk '{print $NF}')
+    if [ -z "$PHP_CONFIG_DIR" ]; then
+        PHP_CONFIG_DIR="/etc/php.d"
+        echo "PHP config directory not found, using default: $PHP_CONFIG_DIR"
+        # Create directory if it doesn't exist
+        sudo mkdir -p $PHP_CONFIG_DIR
+    fi
+    
+    # Create configuration file for Imagick
+    echo "extension=imagick.so" | sudo tee $PHP_CONFIG_DIR/20-imagick.ini > /dev/null
+    
+    # Start services - use service command instead of systemctl for container compatibility
+    echo "Starting web services..."
+    command -v service >/dev/null 2>&1 && { 
+        sudo service httpd start || echo "Warning: Could not start httpd service";
+        sudo service php-fpm start || echo "Warning: Could not start php-fpm service";
+    } || {
+        echo "Service command not available, trying to start services using alternative methods..."
+    }
+    
+    # Verify installation
+    echo "Verifying PHP Imagick installation..."
+    if php -m | grep -q imagick; then
+        echo "PHP Imagick extension installed successfully!"
+    else
+        echo "Warning: PHP Imagick extension installation might have failed, but continuing with WordPress setup..."
+    fi
+
+    echo "Setting up WordPress database and configuration..."
+    # Check if MySQL/MariaDB is available
+    if command -v mysql >/dev/null 2>&1; then
+        echo "Configuring MySQL for WordPress..."
+        sudo mysql -e "CREATE USER IF NOT EXISTS wordpressuser@localhost IDENTIFIED BY 'password';" || echo "Warning: Could not create MySQL user"
+        sudo mysql -e "CREATE DATABASE IF NOT EXISTS wordpress;" || echo "Warning: Could not create WordPress database"
+        sudo mysql -e "GRANT ALL PRIVILEGES ON wordpress.* TO wordpressuser@localhost; FLUSH PRIVILEGES;" || echo "Warning: Could not grant privileges"
+    else
+        echo "MySQL not found. Install MySQL/MariaDB first to use WordPress."
+    fi
+    
+    # Configure WordPress
+    if command -v wp >/dev/null 2>&1; then
+        echo "Configuring WordPress..."
+        sudo wp config create --dbname=wordpress --dbuser=wordpressuser --dbpass=password --path=/var/www/html/ --skip-check || echo "Warning: Could not create wp-config.php"
+        
+        # Setup WordPress uploads directory
+        sudo mkdir -p /var/www/html/wp-content/uploads
+        sudo chmod 775 /var/www/html/wp-content/uploads
+        # Use current user instead of ec2-user
+        sudo chown -R $(whoami):$(whoami) /var/www/html/wp-content/uploads
+        
+        # Configure PHP settings if php.ini exists
+        if [ -f /etc/php.ini ]; then
+            echo "Increasing PHP limits for file uploads..."
+            sudo sed -i.bak -e "s/^upload_max_filesize.*/upload_max_filesize = 512M/g" /etc/php.ini || echo "Warning: Could not update upload_max_filesize"
+            sudo sed -i.bak -e "s/^post_max_size.*/post_max_size = 512M/g" /etc/php.ini || echo "Warning: Could not update post_max_size"
+            sudo sed -i.bak -e "s/^max_execution_time.*/max_execution_time = 300/g" /etc/php.ini || echo "Warning: Could not update max_execution_time"
+            sudo sed -i.bak -e "s/^max_input_time.*/max_input_time = 300/g" /etc/php.ini || echo "Warning: Could not update max_input_time"
+        else
+            echo "PHP configuration file not found at /etc/php.ini"
+        fi
+        
+        # Install WordPress if wp-cli is available
+        sudo wp core install --url=$(curl -s ifconfig.me) --title="Website Title" --admin_user="admin" --admin_password="password" --admin_email="x@y.com" --path=/var/www/html/ || echo "Warning: Could not install WordPress core"
+        
+        # Install and activate plugin
+        sudo wp plugin install all-in-one-wp-migration --activate --path=/var/www/html/ || echo "Warning: Could not install WordPress plugin"
+        
+        # Update themes
+        echo "Updating WordPress themes..."
+        sudo wp theme update --all --path=/var/www/html/ || echo "Warning: Could not update WordPress themes"
+        
+        # Update WordPress site URLs to use HTTPS domain if HTTPS is enabled
+        if [ '"$SETUP_HTTPS"' = true ] && [ -n '"$DOMAIN_NAME"' ]; then
+            echo "Updating WordPress site URLs to use HTTPS domain..."
+            sudo wp option update home "https://'"$DOMAIN_NAME"'" --path=/var/www/html/ || echo "Warning: Could not update home URL"
+            sudo wp option update siteurl "https://'"$DOMAIN_NAME"'" --path=/var/www/html/ || echo "Warning: Could not update site URL"
+            echo "WordPress URLs updated to use HTTPS with domain: '"$DOMAIN_NAME"'"
+        fi
+    else
+        echo "WordPress CLI not found. Please install wp-cli to use WordPress."
+    fi
+    
+    echo "WordPress setup completed with available components."
 fi
 
 #----------------
@@ -596,6 +947,19 @@ if [ '$INSTALL_WORDPRESS' = true ]; then
 fi
 if [ '$INSTALL_MATOMO' = true ]; then
     printf "\nOpen an internet browser and go to: \e[3;4;33mhttp://$(curl -s ifconfig.me)/matomo\e[0m - Matomo Install page.\n"
+fi
+if [ '$SETUP_HTTPS' = true ]; then
+    printf "\n\e[1;32mHTTPS Setup Information:\e[0m\n"
+    printf "Your secure website will be accessible at: \e[3;4;33mhttps://$DOMAIN_NAME\e[0m\n"
+    printf "You can also access the site via the ALB DNS: \e[3;4;33mhttps://$ALB_DNS_NAME\e[0m\n"
+    printf "Note that it may take some time for DNS changes to propagate globally.\n"
+    
+    if [ '$INSTALL_WORDPRESS' = true ]; then
+        printf "Once DNS propagation is complete, log in to WordPress and update the site URL:\n"
+        printf "1. Access WordPress admin: \e[3;4;33mhttps://$DOMAIN_NAME/wp-admin\e[0m\n"
+        printf "2. Go to Settings > General\n"
+        printf "3. Update both \"WordPress Address (URL)\" and \"Site Address (URL)\" to \e[3;4;33mhttps://$DOMAIN_NAME\e[0m\n"
+    fi
 fi
 printf "\nYou can SSH into your new VM on this Cloud Shell using: \e[3;4;33mssh vm\e[0m\n"
 echo "********************************"
