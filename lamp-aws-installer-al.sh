@@ -417,30 +417,55 @@ rok()   { printf "      ${CHECK} %s\n" "$1"; }
 rinfo() { printf "      ${ARROW} %s\n" "$1"; }
 rnote() { printf "      ${DOT} %s\n" "$1"; }
 
+# Spinner for long-running remote commands (same animation as local)
+RSPIN_PID=""
+rspin() {
+    local msg="$1"
+    local frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
+    local i=0
+    tput civis 2>/dev/null
+    while true; do
+        printf "\r      ${YELLOW}%s${CLR} %s " "${frames[$i]}" "$msg"
+        i=$(( (i + 1) % ${#frames[@]} ))
+        sleep 0.12
+    done &
+    RSPIN_PID=$!
+}
+rstop() {
+    if [ -n "$RSPIN_PID" ] && kill -0 "$RSPIN_PID" 2>/dev/null; then
+        kill "$RSPIN_PID" 2>/dev/null
+        wait "$RSPIN_PID" 2>/dev/null || true
+        RSPIN_PID=""
+        printf "\r\033[K"
+        tput cnorm 2>/dev/null
+    fi
+}
+trap "rstop; tput cnorm 2>/dev/null" EXIT
+
 #----------------
 # LAMP Stack
 #----------------
 if [ '"$INSTALL_LAMP"' = true ]; then
     rstep "LAMP Stack"
-    rinfo "Updating package repositories"
+    rspin "Updating package repositories"
     sudo dnf clean all --quiet > /dev/null 2>&1
     sudo dnf makecache --quiet > /dev/null 2>&1
-    rok "Package cache refreshed"
+    rstop; rok "Package cache refreshed"
 
-    rinfo "Installing Apache"
+    rspin "Installing Apache"
     sudo dnf install -y httpd > /dev/null 2>&1
-    rok "Apache installed"
+    rstop; rok "Apache installed"
 
-    rinfo "Installing MariaDB"
+    rspin "Installing MariaDB"
     MARIADB_LATEST_PACKAGE=$(dnf list available 2>/dev/null | grep -E "^mariadb[0-9]+-server" | awk "{print \$1}" | sort -V | tail -n 1)
     sudo dnf install -y "$MARIADB_LATEST_PACKAGE" > /dev/null 2>&1
-    rok "MariaDB installed"
+    rstop; rok "MariaDB installed"
 
-    rinfo "Installing PHP"
+    rspin "Installing PHP"
     sudo dnf install -y php > /dev/null 2>&1
-    rok "PHP installed"
+    rstop; rok "PHP installed"
 
-    rinfo "Configuring web server"
+    rspin "Configuring web server"
     sudo sed -i.bak -e "s/DirectoryIndex index.html/DirectoryIndex index.php index.html/" /etc/httpd/conf/httpd.conf || true
     sudo dnf install -y wget > /dev/null 2>&1
     sudo wget -q https://raw.githubusercontent.com/danielcregg/simple-php-website/main/index.php -P /var/www/html/
@@ -448,7 +473,7 @@ if [ '"$INSTALL_LAMP"' = true ]; then
     sudo chown -R apache:apache /var/www
     sudo systemctl enable --now httpd > /dev/null 2>&1
     sudo systemctl enable --now mariadb > /dev/null 2>&1
-    rok "Apache & MariaDB running"
+    rstop; rok "Apache & MariaDB running"
 fi
 
 #----------------
@@ -456,11 +481,11 @@ fi
 #----------------
 if [ '"$INSTALL_SFTP"' = true ]; then
     rstep "SFTP Access"
-    rinfo "Enabling root SSH login"
+    rspin "Enabling root SSH login"
     sudo sed -i "/PermitRootLogin/c\PermitRootLogin yes" /etc/ssh/sshd_config
     echo "root:tester" | sudo chpasswd 2>/dev/null
     sudo systemctl restart sshd > /dev/null 2>&1
-    rok "Root SFTP access enabled"
+    rstop; rok "Root SFTP access enabled"
 fi
 
 #----------------
@@ -476,23 +501,23 @@ fi
 #----------------
 if [ '"$INSTALL_WORDPRESS"' = true ]; then
     rstep "WordPress"
-    rinfo "Installing WP-CLI"
+    rspin "Installing WP-CLI"
     curl -sO https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
     chmod +x wp-cli.phar
     sudo mv wp-cli.phar /usr/local/bin/wp
-    rok "WP-CLI installed"
+    rstop; rok "WP-CLI installed"
 
-    rinfo "Downloading WordPress core"
+    rspin "Downloading WordPress core"
     sudo mkdir -p /usr/share/httpd/.wp-cli/cache
     sudo chown -R apache:apache /usr/share/httpd/.wp-cli
     sudo -u apache wp core download --path=/var/www/html/ --quiet 2>/dev/null
-    rok "WordPress downloaded"
+    rstop; rok "WordPress downloaded"
 
-    rinfo "Installing PHP extensions for WordPress"
+    rspin "Installing PHP extensions"
     sudo dnf install -y php php-mysqlnd php-gd php-curl php-dom php-mbstring php-zip php-intl > /dev/null 2>&1
-    rok "PHP extensions installed"
+    rstop; rok "PHP extensions installed"
 
-    rinfo "Compiling PHP Imagick from source"
+    rspin "Compiling PHP Imagick from source (this may take a minute)"
     sudo dnf check-release-update > /dev/null 2>&1 || true
     sudo dnf upgrade --releasever=latest -y > /dev/null 2>&1
     sudo dnf install -y php-devel php-pear gcc ImageMagick ImageMagick-devel > /dev/null 2>&1
@@ -509,16 +534,16 @@ if [ '"$INSTALL_WORDPRESS"' = true ]; then
     sudo systemctl restart httpd > /dev/null 2>&1
     cd ..
     rm -rf imagick*
-    rok "Imagick compiled and loaded"
+    rstop; rok "Imagick compiled and loaded"
 
-    rinfo "Creating WordPress database"
+    rspin "Creating WordPress database"
     sudo mysql -Bse "CREATE USER IF NOT EXISTS wordpressuser@localhost IDENTIFIED BY '\''password'\'';GRANT ALL PRIVILEGES ON *.* TO wordpressuser@localhost;FLUSH PRIVILEGES;" 2>/dev/null
     sudo -u apache wp config create --dbname=wordpress --dbuser=wordpressuser --dbpass=password --path=/var/www/html/ --quiet 2>/dev/null
     sudo -u apache wp db create --path=/var/www/html/ --quiet 2>/dev/null
     sudo mysql -Bse "REVOKE ALL PRIVILEGES, GRANT OPTION FROM wordpressuser@localhost;GRANT ALL PRIVILEGES ON wordpress.* TO wordpressuser@localhost;FLUSH PRIVILEGES;" 2>/dev/null
-    rok "Database created and secured"
+    rstop; rok "Database created and secured"
 
-    rinfo "Configuring WordPress"
+    rspin "Configuring WordPress"
     sudo mkdir -p /var/www/html/wp-content/uploads
     sudo chmod 775 /var/www/html/wp-content/uploads
     sudo chown apache:apache /var/www/html/wp-content/uploads
@@ -528,20 +553,20 @@ if [ '"$INSTALL_WORDPRESS"' = true ]; then
     sudo sed -i.bak -e "s/^max_input_time.*/max_input_time = 300/g" /etc/php.ini
     sudo systemctl restart httpd > /dev/null 2>&1
     sudo -u apache wp core install --url=$(curl -s ifconfig.me) --title="Website Title" --admin_user="admin" --admin_password="password" --admin_email="x@y.com" --path=/var/www/html/ --quiet 2>/dev/null
-    rok "WordPress configured"
+    rstop; rok "WordPress configured"
 
-    rinfo "Cleaning up default plugins and themes"
+    rspin "Cleaning up default plugins and themes"
     sudo -u apache wp plugin list --status=inactive --field=name --path=/var/www/html/ 2>/dev/null | xargs --replace=% sudo -u apache wp plugin delete % --path=/var/www/html/ --quiet 2>/dev/null
     sudo -u apache wp theme list --status=inactive --field=name --path=/var/www/html/ 2>/dev/null | xargs --replace=% sudo -u apache wp theme delete % --path=/var/www/html/ --quiet 2>/dev/null
-    rok "Inactive plugins and themes removed"
+    rstop; rok "Inactive plugins and themes removed"
 
-    rinfo "Installing All-in-One WP Migration plugin"
+    rspin "Installing All-in-One WP Migration plugin"
     sudo -u apache wp plugin install all-in-one-wp-migration --activate --path=/var/www/html/ --quiet 2>/dev/null
-    rok "Plugin installed and activated"
+    rstop; rok "Plugin installed and activated"
 
-    rinfo "Updating themes"
+    rspin "Updating themes"
     sudo -u apache wp theme update --all --path=/var/www/html/ --quiet 2>/dev/null
-    rok "Themes up to date"
+    rstop; rok "Themes up to date"
 fi
 
 #----------------
@@ -549,28 +574,28 @@ fi
 #----------------
 if [ '"$INSTALL_MATOMO"' = true ]; then
     rstep "Matomo Analytics"
-    rinfo "Installing dependencies"
+    rspin "Installing dependencies"
     sudo dnf install -y unzip php-dom php-xml php-mbstring > /dev/null 2>&1
     sudo systemctl restart httpd > /dev/null 2>&1
-    rok "Dependencies installed"
+    rstop; rok "Dependencies installed"
 
-    rinfo "Downloading and extracting Matomo"
+    rspin "Downloading and extracting Matomo"
     sudo wget -q https://builds.matomo.org/matomo.zip -P /var/www/html/
     sudo unzip -oq /var/www/html/matomo.zip -d /var/www/html/
     sudo chown -R apache:apache /var/www/html/matomo
     sudo rm -f /var/www/html/matomo.zip
     sudo rm -f /var/www/html/'\''How to install Matomo.html'\''
-    rok "Matomo extracted"
+    rstop; rok "Matomo extracted"
 
-    rinfo "Creating Matomo database"
+    rspin "Creating Matomo database"
     sudo mysql -Bse "CREATE DATABASE matomodb;CREATE USER matomoadmin@localhost IDENTIFIED BY '\''password'\'';GRANT ALL PRIVILEGES ON matomodb.* TO matomoadmin@localhost; FLUSH PRIVILEGES;" 2>/dev/null
-    rok "Database ready"
+    rstop; rok "Database ready"
 
-    rinfo "Installing WordPress plugins for Matomo"
+    rspin "Installing WordPress plugins for Matomo"
     sudo -u apache wp plugin install matomo --activate --path=/var/www/html/ --quiet 2>/dev/null
     sudo -u apache wp plugin install wp-piwik --activate --path=/var/www/html/ --quiet 2>/dev/null
     sudo -u apache wp plugin install super-progressive-web-apps --activate --path=/var/www/html/ --quiet 2>/dev/null
-    rok "Matomo plugins activated"
+    rstop; rok "Matomo plugins activated"
 fi
 '
 
