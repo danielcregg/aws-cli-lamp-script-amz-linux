@@ -1,16 +1,19 @@
 #!/bin/bash
+set -euo pipefail
 
 ###########################################
 # AWS LAMP Stack Deployment Script
 #
-# This script automates the deployment of a LAMP stack on AWS.
-# It can optionally install:
-# - Basic LAMP (Linux, Apache, MySQL, PHP)
-# - SFTP access
-# - VS Code server
-# - Database management tools
-# - WordPress
-# - Matomo Analytics
+# Automates the deployment of a LAMP stack
+# on an AWS EC2 instance (Amazon Linux 2023).
+#
+# Optional components (cumulative flags):
+#   -lamp   : Apache, MariaDB, PHP
+#   -sftp   : + SFTP root access
+#   -vscode : + VS Code Server
+#   -db     : + Database management tools
+#   -wp     : + WordPress (WP-CLI, Imagick)
+#   -mt     : + Matomo Analytics
 ###########################################
 
 ###########################################
@@ -36,6 +39,8 @@ INSTALL_MATOMO=false
 ###########################################
 # Helper Functions
 ###########################################
+
+# Display an animated spinner with a message (call in a loop)
 show_spinner() {
     local message="$1"
     echo -en "\r\033[K$message"
@@ -45,39 +50,30 @@ show_spinner() {
     done
 }
 
-wait_for_termination() {
-    local resource_id="$1"
-    local resource_type="$2"
-    # ...existing status check code...
-}
-
-# Function to retry AWS commands with exponential backoff
+# Retry a command with exponential backoff (base 5s * 2^attempt)
+# Usage: retry_command "aws ec2 ..." "create instance" 3
 retry_command() {
-    local cmd=$1
-    local description=$2
-    local max_attempts=$3
+    local cmd="$1"
+    local description="$2"
+    local max_attempts="${3:-$MAX_RETRIES}"
     local attempt=1
     local output=""
-    local status=1
-    
+
     echo "Attempting to $description..."
-    while [ $attempt -le $max_attempts ]; do
+    while [ "$attempt" -le "$max_attempts" ]; do
         echo " - Attempt $attempt/$max_attempts"
-        output=$(eval "$cmd" 2>&1)
-        status=$?
-        
-        if [ $status -eq 0 ]; then
+        if output=$(eval "$cmd" 2>&1); then
             echo " - Success: $description"
             echo "$output"
             return 0
         fi
-        
-        wait_time=$((2 ** ($attempt - 1) * 5))
-        echo " - Failed. Waiting ${wait_time} seconds before retrying..."
-        sleep $wait_time
+
+        local wait_time=$((2 ** (attempt - 1) * 5))
+        echo " - Failed. Waiting ${wait_time}s before retrying..."
+        sleep "$wait_time"
         attempt=$((attempt + 1))
     done
-    
+
     echo "Failed to $description after $max_attempts attempts. Exiting..."
     echo "Last error: $output"
     return 1
@@ -139,7 +135,7 @@ printf "\e[3;4;31mStarting cleanup of AWS resources...\e[0m\n"
 echo "1. Checking for existing Elastic IPs..."
 EXISTING_ELASTIC_IP_ALLOCATION_IDS=$(aws ec2 describe-tags \
     --filters "Name=key,Values=Name" "Name=value,Values=${ELASTIC_IP_TAG_NAME}" "Name=resource-type,Values=elastic-ip" \
-    --query 'Tags[*].ResourceId' --output text)
+    --query 'Tags[*].ResourceId' --output text) || true
 if [ -n "$EXISTING_ELASTIC_IP_ALLOCATION_IDS" ]; then
     echo " - Found existing Elastic IPs, checking availability..."
     # Get the first available (unallocated or at least not associated) Elastic IP
@@ -151,8 +147,8 @@ if [ -n "$EXISTING_ELASTIC_IP_ALLOCATION_IDS" ]; then
             break
         fi
     done
-    # If no available IP found, release the first one to reuse
-    if [ -z "$REUSE_ALLOCATION_ID" ]; then
+    # If no available IP found, disassociate the first one to reuse
+    if [ -z "${REUSE_ALLOCATION_ID:-}" ]; then
         ALLOCATION_ID=$(echo $EXISTING_ELASTIC_IP_ALLOCATION_IDS | awk '{print $1}')
         echo " - No available Elastic IPs found, releasing one to reuse..."
         aws ec2 disassociate-address --allocation-id $ALLOCATION_ID > /dev/null 2>&1
@@ -166,7 +162,7 @@ fi
 echo "2. Cleaning up EC2 instances..."  
 EXISTING_INSTANCE_IDS=$(aws ec2 describe-instances \
     --filters "Name=tag:Name,Values=${INSTANCE_TAG_NAME}" "Name=instance-state-name,Values=running,pending,stopping,stopped" \
-    --query 'Reservations[*].Instances[*].InstanceId' --output text)
+    --query 'Reservations[*].Instances[*].InstanceId' --output text) || true
 if [ -n "$EXISTING_INSTANCE_IDS" ]; then
     echo " - Found existing instances, renaming before termination..."
     # Rename instances by adding "-deleting" suffix to avoid naming conflicts
@@ -182,13 +178,13 @@ else
     echo " - No existing instances found"
 fi
 
-# 3. Checking for existing security groups...
-EXISTING_SG_ID=$(aws ec2 describe-security-groups --group-names ${SECURITY_GROUP_NAME} \
-    --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null)
+# 3. Check for existing security group to reuse (avoids duplicate creation errors)
+echo "3. Checking for existing security groups..."
+EXISTING_SG_ID=$(aws ec2 describe-security-groups --group-names "${SECURITY_GROUP_NAME}" \
+    --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null) || true
 if [ -n "$EXISTING_SG_ID" ] && [ "$EXISTING_SG_ID" != "None" ]; then
     echo " - Found existing security group with ID: $EXISTING_SG_ID"
-    # Store the ID to reuse later
-    SG_ID=$EXISTING_SG_ID
+    SG_ID="$EXISTING_SG_ID"
     echo " - Will reuse existing security group"
 else
     echo " - No existing security group found with name ${SECURITY_GROUP_NAME}"
@@ -212,7 +208,7 @@ if [ -f ~/.ssh/config ]; then
 fi
 
 # Check for existing key pair with the same name
-KEY_EXISTS=$(aws ec2 describe-key-pairs --key-names ${SSH_KEY_NAME} --query 'KeyPairs[0].KeyName' --output text 2>/dev/null)
+KEY_EXISTS=$(aws ec2 describe-key-pairs --key-names "${SSH_KEY_NAME}" --query 'KeyPairs[0].KeyName' --output text 2>/dev/null) || true
 if [ "$KEY_EXISTS" = "${SSH_KEY_NAME}" ]; then
     echo " - Found existing key pair with name: ${SSH_KEY_NAME}"
     # Check if the private key file exists locally
@@ -256,13 +252,10 @@ else
     fi
 fi
 
-# 2. Create or reuse security group
-if [ -n "$SG_ID" ]; then
+# 2. Create or reuse security group (ports are verified/added below regardless)
+if [ -n "${SG_ID:-}" ]; then
     echo "Reusing existing security group: $SG_ID"
     echo " - Security group already exists, skipping creation"
-    # Optionally verify/update rules if needed
-    # The checks below will ensure the required ports are open
-    EXISTING_RULES=$(aws ec2 describe-security-groups --group-ids $SG_ID --query 'SecurityGroups[0].IpPermissions' --output json)
 else
     echo "Creating security group ${SECURITY_GROUP_NAME}..."
     # Create the security group with original name
@@ -294,44 +287,29 @@ else
 
     echo "Successfully created security group: $SG_ID"
     aws ec2 create-tags --resources "$SG_ID" --tags "Key=Name,Value=${SECURITY_GROUP_NAME}" > /dev/null
-    # For new security groups, we need to set permissions
-    EXISTING_RULES="[]"  # No rules yet
 fi
 
-# Check and configure required ports - only add if they don't exist
+# Ensure all required ports are open (idempotent — skips ports already open)
 echo "Verifying required ports..."
 
-# Helper function to check if port is already open
-port_is_open() {
-    local port=$1
-    echo "$EXISTING_RULES" | grep -q "\"FromPort\": $port" && \
-    echo "$EXISTING_RULES" | grep -q "\"ToPort\": $port" && \
-    echo "$EXISTING_RULES" | grep -q "\"CidrIp\": \"0.0.0.0/0\""
+# Open a port if it isn't already allowed for 0.0.0.0/0.
+# Uses authorize-security-group-ingress which is a no-op error when the rule exists,
+# so we just suppress that specific error.
+open_port_if_needed() {
+    local port="$1"
+    local label="$2"
+    if ! aws ec2 authorize-security-group-ingress --group-id "$SG_ID" \
+        --protocol tcp --port "$port" --cidr 0.0.0.0/0 > /dev/null 2>&1; then
+        echo " - $label (port $port) already open"
+    else
+        echo " - Opened $label (port $port)"
+    fi
 }
 
-# Open SSH port if needed
-if ! port_is_open 22; then
-    echo " - Opening SSH (port 22)"
-    aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 22 --cidr 0.0.0.0/0 > /dev/null
-fi
-
-# Open HTTP port if needed
-if ! port_is_open 80; then
-    echo " - Opening HTTP (port 80)"
-    aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 80 --cidr 0.0.0.0/0 > /dev/null
-fi
-
-# Open HTTPS port if needed
-if ! port_is_open 443; then
-    echo " - Opening HTTPS (port 443)"
-    aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 443 --cidr 0.0.0.0/0 > /dev/null
-fi
-
-# Open Code Server port if needed
-if ! port_is_open 8080; then
-    echo " - Opening Code Server (port 8080)"
-    aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 8080 --cidr 0.0.0.0/0 > /dev/null
-fi
+open_port_if_needed 22   "SSH"
+open_port_if_needed 80   "HTTP"
+open_port_if_needed 443  "HTTPS"
+open_port_if_needed 8080 "Code Server"
 
 # 3. Launch EC2 instance using standard Amazon Linux 2023 AMI
 echo "Retrieving the latest Amazon Linux 2023 AMI using SSM parameter..."
@@ -372,7 +350,7 @@ while true; do
 done
 
 # 4. Configure Elastic IP
-if [ -n "$REUSE_ALLOCATION_ID" ]; then
+if [ -n "${REUSE_ALLOCATION_ID:-}" ]; then
     echo "Reusing existing Elastic IP..."
     ALLOCATION_ID=$REUSE_ALLOCATION_ID
 else
@@ -399,15 +377,18 @@ if [ ! -f ~/.ssh/${SSH_KEY_NAME} ]; then
     exit 1
 fi
 
-# Display key file permissions for debugging
+# Verify key file permissions before connecting
 ls -la ~/.ssh/${SSH_KEY_NAME}
 
+# Wait for SSH to become available on the new instance.
+# StrictHostKeyChecking=no is used because this is a freshly created instance
+# with no prior host key — the Elastic IP may have been reused from a previous run.
 echo "Attempting to establish SSH connection..."
 count=0
-while ! ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -i ~/.ssh/${SSH_KEY_NAME} ec2-user@$ELASTIC_IP 'exit' 2>/dev/null; do
+while ! ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -i ~/.ssh/${SSH_KEY_NAME} ec2-user@"$ELASTIC_IP" 'exit' 2>/dev/null; do
     count=$((count+1))
-    printf "\rAttempt %d/%d " $count $MAX_RETRIES
-    if [ $count -eq $MAX_RETRIES ]; then
+    printf "\rAttempt %d/%d " "$count" "$MAX_RETRIES"
+    if [ "$count" -eq "$MAX_RETRIES" ]; then
         echo -e "\nFailed to establish SSH connection after $MAX_RETRIES attempts"
         exit 1
     fi
@@ -441,10 +422,8 @@ if [ '"$INSTALL_LAMP"' = true ]; then
     sudo wget https://raw.githubusercontent.com/danielcregg/simple-php-website/main/index.php -P /var/www/html/
     sudo rm -f /var/www/html/index.html
     sudo chown -R apache:apache /var/www
-    sudo systemctl enable httpd
-    sudo systemctl start httpd
-    sudo systemctl enable mariadb
-    sudo systemctl start mariadb
+    sudo systemctl enable --now httpd
+    sudo systemctl enable --now mariadb
 fi
 
 #----------------
@@ -453,7 +432,7 @@ fi
 if [ '"$INSTALL_SFTP"' = true ]; then
     echo "Enabling root login for SFTP..."
     sudo sed -i "/PermitRootLogin/c\PermitRootLogin yes" /etc/ssh/sshd_config
-    sudo echo -e "tester\ntester" | sudo passwd root
+    echo "root:tester" | sudo chpasswd
     sudo systemctl restart sshd
 fi
 
@@ -462,23 +441,9 @@ fi
 #----------------
 if [ '"$INSTALL_VSCODE"' = true ]; then
     echo "Setting up VS Code Server..."
-    # Insert VS Code Server installation commands here
+    # TODO: Add VS Code Server installation commands
+    echo " - VS Code Server installation not yet implemented, skipping..."
 fi
-
-#----------------
-# Database Tools
-#----------------
-#if [ '"$INSTALL_DB"' = true ]; then
-#    echo "Installing Adminer..."
-#    sudo dnf install -y adminer
-#    echo "Configuring Adminer..."
-#    sudo ln -s /etc/adminer/conf.d/adminer.conf /etc/httpd/conf.d/adminer.conf || true
-#    sudo mysql -Bse "CREATE USER IF NOT EXISTS admin@localhost IDENTIFIED BY '\''password'\'';GRANT ALL PRIVILEGES ON *.* TO admin@localhost;FLUSH PRIVILEGES;"
-#    sudo systemctl reload httpd
-
-#    echo "Installing phpMyAdmin..."
-#    sudo dnf install -y phpmyadmin
-#fi
 
 #----------------
 # WordPress
@@ -499,9 +464,9 @@ if [ '"$INSTALL_WORDPRESS"' = true ]; then
     echo "Installing required PHP modules for WordPress..."
     sudo dnf install -y php php-mysqlnd php-gd php-curl php-dom php-mbstring php-zip php-intl
     
-    # Install PHP Imagick module which is recommended for WordPress image processing
-    # Update system and install prerequisites
-    sudo dnf check-release-update
+    # Install PHP Imagick module (recommended for WordPress image processing).
+    # AL2023 does not provide a pre-built php-imagick package, so we compile from source.
+    sudo dnf check-release-update || true
     sudo dnf upgrade --releasever=latest -y
     sudo dnf install -y php-devel php-pear gcc ImageMagick ImageMagick-devel
 
@@ -518,8 +483,8 @@ if [ '"$INSTALL_WORDPRESS"' = true ]; then
     # Create configuration file
     echo "extension=imagick.so" | sudo tee /etc/php.d/25-imagick.ini > /dev/null
 
-    # Restart PHP-FPM and Apache (if applicable)
-    sudo systemctl restart php-fpm
+    # Restart Apache to load the new extension (php-fpm may not be active on AL2023)
+    sudo systemctl restart php-fpm 2>/dev/null || true
     sudo systemctl restart httpd
 
     # Verify installation
@@ -532,9 +497,11 @@ if [ '"$INSTALL_WORDPRESS"' = true ]; then
     echo "php-imagick installation complete!"
 
     echo "Configuring WordPress..."
+    # Create DB user with full privileges first so wp-cli can create the database,
+    # then revoke and restrict to only the wordpress database.
     sudo mysql -Bse "CREATE USER IF NOT EXISTS wordpressuser@localhost IDENTIFIED BY '\''password'\'';GRANT ALL PRIVILEGES ON *.* TO wordpressuser@localhost;FLUSH PRIVILEGES;"
     sudo -u apache wp config create --dbname=wordpress --dbuser=wordpressuser --dbpass=password --path=/var/www/html/
-    wp db create --path=/var/www/html/
+    sudo -u apache wp db create --path=/var/www/html/
     sudo mysql -Bse "REVOKE ALL PRIVILEGES, GRANT OPTION FROM wordpressuser@localhost;GRANT ALL PRIVILEGES ON wordpress.* TO wordpressuser@localhost;FLUSH PRIVILEGES;"
     sudo mkdir -p /var/www/html/wp-content/uploads
     sudo chmod 775 /var/www/html/wp-content/uploads
@@ -550,7 +517,6 @@ if [ '"$INSTALL_WORDPRESS"' = true ]; then
     sudo -u apache wp theme list --status=inactive --field=name --path=/var/www/html/ | xargs --replace=% sudo -u apache wp theme delete % --path=/var/www/html/
     sudo -u apache wp plugin install all-in-one-wp-migration --activate --path=/var/www/html/
     
-    # Add theme update functionality
     echo "Updating WordPress themes..."
     sudo -u apache wp theme update --all --path=/var/www/html/
 fi
