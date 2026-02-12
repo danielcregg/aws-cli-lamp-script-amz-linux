@@ -147,11 +147,15 @@ if [ -n "$EXISTING_ELASTIC_IP_ALLOCATION_IDS" ]; then
             break
         fi
     done
-    # If no available IP found, disassociate the first one to reuse
+    # If no available IP found, disassociate the first one so we can reuse it
     if [ -z "${REUSE_ALLOCATION_ID:-}" ]; then
         ALLOCATION_ID=$(echo $EXISTING_ELASTIC_IP_ALLOCATION_IDS | awk '{print $1}')
-        echo " - No available Elastic IPs found, releasing one to reuse..."
-        aws ec2 disassociate-address --allocation-id $ALLOCATION_ID > /dev/null 2>&1
+        echo " - No available Elastic IPs found, disassociating one to reuse..."
+        ASSOC_ID=$(aws ec2 describe-addresses --allocation-ids "$ALLOCATION_ID" \
+            --query 'Addresses[0].AssociationId' --output text) || true
+        if [ -n "$ASSOC_ID" ] && [ "$ASSOC_ID" != "None" ]; then
+            aws ec2 disassociate-address --association-id "$ASSOC_ID" > /dev/null 2>&1 || true
+        fi
         REUSE_ALLOCATION_ID=$ALLOCATION_ID
     fi
 else
