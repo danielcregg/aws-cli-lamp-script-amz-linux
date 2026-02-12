@@ -395,6 +395,11 @@ done
 stop_spinner
 ok "SSH connection verified"
 
+# Set a friendly hostname so the SSH prompt reads [ec2-user@WebServerAuto ~]$
+ssh -o StrictHostKeyChecking=no -i ~/.ssh/${SSH_KEY_NAME} ec2-user@"$ELASTIC_IP" \
+    "sudo hostnamectl set-hostname ${INSTANCE_TAG_NAME}" > /dev/null 2>&1
+ok "Hostname set to ${INSTANCE_TAG_NAME}"
+
 ###########################################
 # Installation Phase (skipped when no flags)
 ###########################################
