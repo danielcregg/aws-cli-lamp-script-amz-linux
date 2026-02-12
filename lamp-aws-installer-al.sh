@@ -405,7 +405,7 @@ ok "Hostname set to ${INSTANCE_TAG_NAME}"
 ###########################################
 if [ "$INSTALL_LAMP" = true ]; then
 step "Installing software on remote instance"
-ssh -o StrictHostKeyChecking=no -i ~/.ssh/${SSH_KEY_NAME} ec2-user@$ELASTIC_IP 'set -e
+ssh -t -o StrictHostKeyChecking=no -i ~/.ssh/${SSH_KEY_NAME} ec2-user@$ELASTIC_IP 'set -e
 
 # ── Remote output helpers (match the local look & feel) ──
 CLR="\033[0m"; BOLD="\033[1m"; DIM="\033[2m"
@@ -423,7 +423,7 @@ rspin() {
     local msg="$1"
     local frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
     local i=0
-    tput civis 2>/dev/null
+    tput civis 2>/dev/null || true
     while true; do
         printf "\r      ${YELLOW}%s${CLR} %s " "${frames[$i]}" "$msg"
         i=$(( (i + 1) % ${#frames[@]} ))
@@ -437,10 +437,10 @@ rstop() {
         wait "$RSPIN_PID" 2>/dev/null || true
         RSPIN_PID=""
         printf "\r\033[K"
-        tput cnorm 2>/dev/null
+        tput cnorm 2>/dev/null || true
     fi
 }
-trap "rstop; tput cnorm 2>/dev/null" EXIT
+trap "rstop; tput cnorm 2>/dev/null || true" EXIT
 
 #----------------
 # LAMP Stack
