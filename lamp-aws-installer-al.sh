@@ -313,6 +313,8 @@ open_port_if_needed 8080 "Code Server"
 ok "Ports open: 22 (SSH), 80 (HTTP), 443 (HTTPS), 8080 (Code Server)"
 
 # 3. Launch EC2 instance using standard Amazon Linux 2023 AMI
+#    The instance takes time to boot, so we launch it now and do other
+#    setup work (Elastic IP, SSH config) while it starts up.
 step "Launching EC2 instance"
 info "Resolving latest Amazon Linux 2023 AMI…"
 AMI_ID=$(aws ssm get-parameter --name "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64" --query "Parameter.Value" --output text)
@@ -324,19 +326,44 @@ INSTANCE_ID=$(aws ec2 run-instances --image-id "$AMI_ID" --count 1 --instance-ty
                         "ResourceType=volume,Tags=[{Key=Name,Value=volWebServerAuto}]" \
     --query 'Instances[0].InstanceId' --output text)
 [ -z "$INSTANCE_ID" ] && die "Failed to launch instance"
-ok "Instance launched (${INSTANCE_TYPE})"
+ok "Instance launched (${INSTANCE_TYPE}) — booting in background"
+LAUNCH_TIME=$(date +%s)
 
-# Wait for the instance to reach the "running" state
-spinner "Waiting for instance to start…" &
+# 4. While the instance boots, prepare the Elastic IP and SSH config
+step "Preparing Elastic IP"
+if [ -n "${REUSE_ALLOCATION_ID:-}" ]; then
+    ALLOCATION_ID=$REUSE_ALLOCATION_ID
+    info "Reusing existing Elastic IP"
+else
+    ALLOCATION_ID=$(aws ec2 allocate-address --domain vpc --query 'AllocationId' --output text)
+    aws ec2 create-tags --resources "$ALLOCATION_ID" --tags Key=Name,Value=${ELASTIC_IP_TAG_NAME}
+    info "Allocated new Elastic IP"
+fi
+ELASTIC_IP=$(aws ec2 describe-addresses --allocation-ids "$ALLOCATION_ID" --query 'Addresses[0].PublicIp' --output text)
+ok "Elastic IP ready: ${ELASTIC_IP}"
+
+# 5. Configure local SSH client (can be done before instance is running)
+step "Configuring local SSH"
+echo "Host vm
+    HostName $ELASTIC_IP
+    User ec2-user
+    IdentityFile ~/.ssh/${SSH_KEY_NAME}" > ~/.ssh/config
+chmod 600 ~/.ssh/config
+
+[ ! -f ~/.ssh/${SSH_KEY_NAME} ] && die "SSH key file not found at ~/.ssh/${SSH_KEY_NAME}"
+ok "SSH config written — you can connect with: ssh vm"
+
+# 6. Now wait for the instance to finish booting
+step "Waiting for instance to be ready"
+spinner "Instance is booting…" &
 SPIN_PID=$!
-start_time=$(date +%s)
 while true; do
-    elapsed=$(( $(date +%s) - start_time ))
+    elapsed=$(( $(date +%s) - LAUNCH_TIME ))
     [ $elapsed -gt $TIMEOUT ] && { stop_spinner; die "Timed out after ${TIMEOUT}s waiting for instance"; }
     STATE=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" --query 'Reservations[0].Instances[0].State.Name' --output text)
     if [ "$STATE" = "running" ]; then
         stop_spinner
-        ok "Instance is running"
+        ok "Instance is running (took ~${elapsed}s)"
         sleep 10
         break
     elif [ "$STATE" = "terminated" ] || [ "$STATE" = "shutting-down" ]; then
@@ -346,34 +373,12 @@ while true; do
     sleep 2
 done
 
-# 4. Configure Elastic IP
-step "Assigning Elastic IP"
-if [ -n "${REUSE_ALLOCATION_ID:-}" ]; then
-    ALLOCATION_ID=$REUSE_ALLOCATION_ID
-    info "Reusing existing Elastic IP"
-else
-    ALLOCATION_ID=$(aws ec2 allocate-address --domain vpc --query 'AllocationId' --output text)
-    aws ec2 create-tags --resources "$ALLOCATION_ID" --tags Key=Name,Value=${ELASTIC_IP_TAG_NAME}
-    info "Allocated new Elastic IP"
-fi
-
-ELASTIC_IP=$(aws ec2 describe-addresses --allocation-ids "$ALLOCATION_ID" --query 'Addresses[0].PublicIp' --output text)
+# 7. Associate Elastic IP now that instance is running
+info "Attaching Elastic IP to instance…"
 aws ec2 associate-address --instance-id "$INSTANCE_ID" --allocation-id "$ALLOCATION_ID" > /dev/null
 ok "Elastic IP ${ELASTIC_IP} attached to instance"
 
-# 5. Configure SSH client
-step "Configuring local SSH"
-echo "Host vm
-    HostName $ELASTIC_IP
-    User ec2-user
-    IdentityFile ~/.ssh/${SSH_KEY_NAME}" > ~/.ssh/config
-chmod 600 ~/.ssh/config
-
-[ ! -f ~/.ssh/${SSH_KEY_NAME} ] && die "SSH key file not found at ~/.ssh/${SSH_KEY_NAME}"
-
-ok "SSH config written — you can connect with: ssh vm"
-
-# Wait for SSH to become available on the new instance.
+# 8. Wait for SSH to become available on the new instance.
 # StrictHostKeyChecking=no is used because this is a freshly created instance
 # with no prior host key — the Elastic IP may have been reused from a previous run.
 spinner "Waiting for SSH to become available…" &
