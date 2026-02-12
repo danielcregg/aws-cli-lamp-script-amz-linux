@@ -602,30 +602,33 @@ fi
 ###########################################
 # Final Status Summary
 ###########################################
+# OSC 8 clickable hyperlink: \e]8;;URL\e\\TEXT\e]8;;\e\\
+link() { printf "\033]8;;%s\033\\%s\033]8;;\033\\" "$1" "$1"; }
+
 step "Deployment complete"
 PUBLIC_IP="$ELASTIC_IP"
 ok "SSH access: ssh vm"
 if [ "$INSTALL_LAMP" = true ]; then
-    ok "Website: http://${PUBLIC_IP}"
+    ok "Website: $(link "http://${PUBLIC_IP}")"
 fi
 if [ "$INSTALL_SFTP" = true ]; then
     ok "SFTP: root@${PUBLIC_IP}  (password: tester)"
-    info "WinSCP: https://dcus.short.gy/downloadWinSCP"
+    info "WinSCP: $(link "https://dcus.short.gy/downloadWinSCP")"
 fi
 if [ "$INSTALL_VSCODE" = true ]; then
-    ok "VS Code: http://${PUBLIC_IP}:8080"
+    ok "VS Code: $(link "http://${PUBLIC_IP}:8080")"
     info "Or SSH in and run: sudo code tunnel"
 fi
 if [ "$INSTALL_DB" = true ]; then
-    ok "Adminer: http://${PUBLIC_IP}/adminer/?username=admin"
-    ok "phpMyAdmin: http://${PUBLIC_IP}/phpmyadmin"
+    ok "Adminer: $(link "http://${PUBLIC_IP}/adminer/?username=admin")"
+    ok "phpMyAdmin: $(link "http://${PUBLIC_IP}/phpmyadmin")"
 fi
 if [ "$INSTALL_WORDPRESS" = true ]; then
-    ok "WordPress: http://${PUBLIC_IP}"
-    ok "WP Admin: http://${PUBLIC_IP}/wp-admin  (admin / password)"
+    ok "WordPress: $(link "http://${PUBLIC_IP}")"
+    ok "WP Admin: $(link "http://${PUBLIC_IP}/wp-admin")  (admin / password)"
 fi
 if [ "$INSTALL_MATOMO" = true ]; then
-    ok "Matomo: http://${PUBLIC_IP}/matomo"
+    ok "Matomo: $(link "http://${PUBLIC_IP}/matomo")"
 fi
 else
     note "No installation flags provided — instance is ready but no software was installed"
