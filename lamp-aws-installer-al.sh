@@ -402,181 +402,201 @@ if [ "$INSTALL_LAMP" = true ]; then
 step "Installing software on remote instance"
 ssh -o StrictHostKeyChecking=no -i ~/.ssh/${SSH_KEY_NAME} ec2-user@$ELASTIC_IP 'set -e
 
+# ── Remote output helpers (match the local look & feel) ──
+CLR="\033[0m"; BOLD="\033[1m"; DIM="\033[2m"
+GREEN="\033[32m"; YELLOW="\033[33m"; BLUE="\033[34m"; RED="\033[31m"; CYAN="\033[36m"
+CHECK="${GREEN}✔${CLR}"; CROSS="${RED}✘${CLR}"; ARROW="${CYAN}➜${CLR}"; DOT="${DIM}·${CLR}"
+RSTEP=0
+rstep() { RSTEP=$((RSTEP + 1)); printf "\n  ${BOLD}${BLUE}(%d)${CLR} ${BOLD}%s${CLR}\n" "$RSTEP" "$1"; }
+rok()   { printf "      ${CHECK} %s\n" "$1"; }
+rinfo() { printf "      ${ARROW} %s\n" "$1"; }
+rnote() { printf "      ${DOT} %s\n" "$1"; }
+
 #----------------
 # LAMP Stack
 #----------------
 if [ '"$INSTALL_LAMP"' = true ]; then
-    echo "Updating DNF repositories..."
-    sudo dnf clean all --quiet
-    sudo dnf makecache --quiet
+    rstep "LAMP Stack"
+    rinfo "Updating package repositories"
+    sudo dnf clean all --quiet > /dev/null 2>&1
+    sudo dnf makecache --quiet > /dev/null 2>&1
+    rok "Package cache refreshed"
 
-    echo "Installing LAMP stack..."
-    sudo dnf install -y httpd 
-    MARIADB_LATEST_PACKAGE=$(dnf list available | grep -E "^mariadb[0-9]+-server" | awk "{print \$1}" | sort -V | tail -n 1) 
-    sudo dnf install -y "$MARIADB_LATEST_PACKAGE" 
-    sudo dnf install -y php 
+    rinfo "Installing Apache"
+    sudo dnf install -y httpd > /dev/null 2>&1
+    rok "Apache installed"
 
-    echo "Configuring LAMP..."
+    rinfo "Installing MariaDB"
+    MARIADB_LATEST_PACKAGE=$(dnf list available 2>/dev/null | grep -E "^mariadb[0-9]+-server" | awk "{print \$1}" | sort -V | tail -n 1)
+    sudo dnf install -y "$MARIADB_LATEST_PACKAGE" > /dev/null 2>&1
+    rok "MariaDB installed"
+
+    rinfo "Installing PHP"
+    sudo dnf install -y php > /dev/null 2>&1
+    rok "PHP installed"
+
+    rinfo "Configuring web server"
     sudo sed -i.bak -e "s/DirectoryIndex index.html/DirectoryIndex index.php index.html/" /etc/httpd/conf/httpd.conf || true
-    sudo dnf install -y wget
-    sudo wget https://raw.githubusercontent.com/danielcregg/simple-php-website/main/index.php -P /var/www/html/
+    sudo dnf install -y wget > /dev/null 2>&1
+    sudo wget -q https://raw.githubusercontent.com/danielcregg/simple-php-website/main/index.php -P /var/www/html/
     sudo rm -f /var/www/html/index.html
     sudo chown -R apache:apache /var/www
-    sudo systemctl enable --now httpd
-    sudo systemctl enable --now mariadb
+    sudo systemctl enable --now httpd > /dev/null 2>&1
+    sudo systemctl enable --now mariadb > /dev/null 2>&1
+    rok "Apache & MariaDB running"
 fi
 
 #----------------
 # SFTP Access
 #----------------
 if [ '"$INSTALL_SFTP"' = true ]; then
-    echo "Enabling root login for SFTP..."
+    rstep "SFTP Access"
+    rinfo "Enabling root SSH login"
     sudo sed -i "/PermitRootLogin/c\PermitRootLogin yes" /etc/ssh/sshd_config
-    echo "root:tester" | sudo chpasswd
-    sudo systemctl restart sshd
+    echo "root:tester" | sudo chpasswd 2>/dev/null
+    sudo systemctl restart sshd > /dev/null 2>&1
+    rok "Root SFTP access enabled"
 fi
 
 #----------------
 # VS Code Server
 #----------------
 if [ '"$INSTALL_VSCODE"' = true ]; then
-    echo "Setting up VS Code Server..."
-    # TODO: Add VS Code Server installation commands
-    echo " - VS Code Server installation not yet implemented, skipping..."
+    rstep "VS Code Server"
+    rnote "Not yet implemented — skipping"
 fi
 
 #----------------
 # WordPress
 #----------------
 if [ '"$INSTALL_WORDPRESS"' = true ]; then
-    echo "Installing WordPress..."
-    echo "Installing wp-cli..."
-    curl -O https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+    rstep "WordPress"
+    rinfo "Installing WP-CLI"
+    curl -sO https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
     chmod +x wp-cli.phar
     sudo mv wp-cli.phar /usr/local/bin/wp
+    rok "WP-CLI installed"
 
-    echo "Creating cache for WordPress..."
+    rinfo "Downloading WordPress core"
     sudo mkdir -p /usr/share/httpd/.wp-cli/cache
     sudo chown -R apache:apache /usr/share/httpd/.wp-cli
-    echo "Downloading WordPress..."
-    sudo -u apache wp core download --path=/var/www/html/
+    sudo -u apache wp core download --path=/var/www/html/ --quiet 2>/dev/null
+    rok "WordPress downloaded"
 
-    echo "Installing required PHP modules for WordPress..."
-    sudo dnf install -y php php-mysqlnd php-gd php-curl php-dom php-mbstring php-zip php-intl
-    
-    # Install PHP Imagick module (recommended for WordPress image processing).
-    # AL2023 does not provide a pre-built php-imagick package, so we compile from source.
-    sudo dnf check-release-update || true
-    sudo dnf upgrade --releasever=latest -y
-    sudo dnf install -y php-devel php-pear gcc ImageMagick ImageMagick-devel
+    rinfo "Installing PHP extensions for WordPress"
+    sudo dnf install -y php php-mysqlnd php-gd php-curl php-dom php-mbstring php-zip php-intl > /dev/null 2>&1
+    rok "PHP extensions installed"
 
-    # Download, compile and install Imagick
-    pecl download Imagick
+    rinfo "Compiling PHP Imagick from source"
+    sudo dnf check-release-update > /dev/null 2>&1 || true
+    sudo dnf upgrade --releasever=latest -y > /dev/null 2>&1
+    sudo dnf install -y php-devel php-pear gcc ImageMagick ImageMagick-devel > /dev/null 2>&1
+    pecl download Imagick > /dev/null 2>&1
     tar -xf imagick*.tgz
     IMAGICK_DIR=$(find . -type d -name "imagick*" | head -1)
     cd "$IMAGICK_DIR"
-    phpize
-    ./configure
-    make
-    sudo make install
-
-    # Create configuration file
+    phpize > /dev/null 2>&1
+    ./configure > /dev/null 2>&1
+    make > /dev/null 2>&1
+    sudo make install > /dev/null 2>&1
     echo "extension=imagick.so" | sudo tee /etc/php.d/25-imagick.ini > /dev/null
-
-    # Restart Apache to load the new extension (php-fpm may not be active on AL2023)
     sudo systemctl restart php-fpm 2>/dev/null || true
-    sudo systemctl restart httpd
-
-    # Verify installation
-    php -m | grep -i imagick
-
-    # Clean up
+    sudo systemctl restart httpd > /dev/null 2>&1
     cd ..
     rm -rf imagick*
+    rok "Imagick compiled and loaded"
 
-    echo "php-imagick installation complete!"
+    rinfo "Creating WordPress database"
+    sudo mysql -Bse "CREATE USER IF NOT EXISTS wordpressuser@localhost IDENTIFIED BY '\''password'\'';GRANT ALL PRIVILEGES ON *.* TO wordpressuser@localhost;FLUSH PRIVILEGES;" 2>/dev/null
+    sudo -u apache wp config create --dbname=wordpress --dbuser=wordpressuser --dbpass=password --path=/var/www/html/ --quiet 2>/dev/null
+    sudo -u apache wp db create --path=/var/www/html/ --quiet 2>/dev/null
+    sudo mysql -Bse "REVOKE ALL PRIVILEGES, GRANT OPTION FROM wordpressuser@localhost;GRANT ALL PRIVILEGES ON wordpress.* TO wordpressuser@localhost;FLUSH PRIVILEGES;" 2>/dev/null
+    rok "Database created and secured"
 
-    echo "Configuring WordPress..."
-    # Create DB user with full privileges first so wp-cli can create the database,
-    # then revoke and restrict to only the wordpress database.
-    sudo mysql -Bse "CREATE USER IF NOT EXISTS wordpressuser@localhost IDENTIFIED BY '\''password'\'';GRANT ALL PRIVILEGES ON *.* TO wordpressuser@localhost;FLUSH PRIVILEGES;"
-    sudo -u apache wp config create --dbname=wordpress --dbuser=wordpressuser --dbpass=password --path=/var/www/html/
-    sudo -u apache wp db create --path=/var/www/html/
-    sudo mysql -Bse "REVOKE ALL PRIVILEGES, GRANT OPTION FROM wordpressuser@localhost;GRANT ALL PRIVILEGES ON wordpress.* TO wordpressuser@localhost;FLUSH PRIVILEGES;"
+    rinfo "Configuring WordPress"
     sudo mkdir -p /var/www/html/wp-content/uploads
     sudo chmod 775 /var/www/html/wp-content/uploads
     sudo chown apache:apache /var/www/html/wp-content/uploads
-    echo "Increasing PHP limits for file uploads..."
     sudo sed -i.bak -e "s/^upload_max_filesize.*/upload_max_filesize = 512M/g" /etc/php.ini
     sudo sed -i.bak -e "s/^post_max_size.*/post_max_size = 512M/g" /etc/php.ini
     sudo sed -i.bak -e "s/^max_execution_time.*/max_execution_time = 300/g" /etc/php.ini
     sudo sed -i.bak -e "s/^max_input_time.*/max_input_time = 300/g" /etc/php.ini
-    sudo systemctl restart httpd
-    sudo -u apache wp core install --url=$(curl -s ifconfig.me) --title="Website Title" --admin_user="admin" --admin_password="password" --admin_email="x@y.com" --path=/var/www/html/
-    sudo -u apache wp plugin list --status=inactive --field=name --path=/var/www/html/ | xargs --replace=% sudo -u apache wp plugin delete % --path=/var/www/html/
-    sudo -u apache wp theme list --status=inactive --field=name --path=/var/www/html/ | xargs --replace=% sudo -u apache wp theme delete % --path=/var/www/html/
-    sudo -u apache wp plugin install all-in-one-wp-migration --activate --path=/var/www/html/
-    
-    echo "Updating WordPress themes..."
-    sudo -u apache wp theme update --all --path=/var/www/html/
+    sudo systemctl restart httpd > /dev/null 2>&1
+    sudo -u apache wp core install --url=$(curl -s ifconfig.me) --title="Website Title" --admin_user="admin" --admin_password="password" --admin_email="x@y.com" --path=/var/www/html/ --quiet 2>/dev/null
+    rok "WordPress configured"
+
+    rinfo "Cleaning up default plugins and themes"
+    sudo -u apache wp plugin list --status=inactive --field=name --path=/var/www/html/ 2>/dev/null | xargs --replace=% sudo -u apache wp plugin delete % --path=/var/www/html/ --quiet 2>/dev/null
+    sudo -u apache wp theme list --status=inactive --field=name --path=/var/www/html/ 2>/dev/null | xargs --replace=% sudo -u apache wp theme delete % --path=/var/www/html/ --quiet 2>/dev/null
+    rok "Inactive plugins and themes removed"
+
+    rinfo "Installing All-in-One WP Migration plugin"
+    sudo -u apache wp plugin install all-in-one-wp-migration --activate --path=/var/www/html/ --quiet 2>/dev/null
+    rok "Plugin installed and activated"
+
+    rinfo "Updating themes"
+    sudo -u apache wp theme update --all --path=/var/www/html/ --quiet 2>/dev/null
+    rok "Themes up to date"
 fi
 
 #----------------
 # Matomo Analytics
 #----------------
 if [ '"$INSTALL_MATOMO"' = true ]; then
-    echo "Installing Matomo Analytics Server..."
-    sudo dnf install -y unzip php-dom php-xml php-mbstring
-    sudo systemctl restart httpd
-    sudo wget https://builds.matomo.org/matomo.zip -P /var/www/html/
+    rstep "Matomo Analytics"
+    rinfo "Installing dependencies"
+    sudo dnf install -y unzip php-dom php-xml php-mbstring > /dev/null 2>&1
+    sudo systemctl restart httpd > /dev/null 2>&1
+    rok "Dependencies installed"
+
+    rinfo "Downloading and extracting Matomo"
+    sudo wget -q https://builds.matomo.org/matomo.zip -P /var/www/html/
     sudo unzip -oq /var/www/html/matomo.zip -d /var/www/html/
     sudo chown -R apache:apache /var/www/html/matomo
     sudo rm -f /var/www/html/matomo.zip
-    sudo rm -f /var/www/html/'How to install Matomo.html'
-    sudo mysql -Bse "CREATE DATABASE matomodb;CREATE USER matomoadmin@localhost IDENTIFIED BY '\''password'\'';GRANT ALL PRIVILEGES ON matomodb.* TO matomoadmin@localhost; FLUSH PRIVILEGES;"
-    sudo -u apache wp plugin install matomo --activate --path=/var/www/html/
-    sudo -u apache wp plugin install wp-piwik --activate --path=/var/www/html/
-    sudo -u apache wp plugin install super-progressive-web-apps --activate --path=/var/www/html/
-fi
+    sudo rm -f /var/www/html/'\''How to install Matomo.html'\''
+    rok "Matomo extracted"
 
-###########################################
-# Final Status Output
-###########################################
-PUBLIC_IP=$(curl -s ifconfig.me)
+    rinfo "Creating Matomo database"
+    sudo mysql -Bse "CREATE DATABASE matomodb;CREATE USER matomoadmin@localhost IDENTIFIED BY '\''password'\'';GRANT ALL PRIVILEGES ON matomodb.* TO matomoadmin@localhost; FLUSH PRIVILEGES;" 2>/dev/null
+    rok "Database ready"
 
-echo ""
-echo "=================================================="
-echo "  Deployment complete!"
-echo "=================================================="
-echo ""
-echo "  SSH access:    ssh vm"
-
-if [ '$INSTALL_LAMP' = true ]; then
-    echo "  Website:       http://${PUBLIC_IP}"
+    rinfo "Installing WordPress plugins for Matomo"
+    sudo -u apache wp plugin install matomo --activate --path=/var/www/html/ --quiet 2>/dev/null
+    sudo -u apache wp plugin install wp-piwik --activate --path=/var/www/html/ --quiet 2>/dev/null
+    sudo -u apache wp plugin install super-progressive-web-apps --activate --path=/var/www/html/ --quiet 2>/dev/null
+    rok "Matomo plugins activated"
 fi
-if [ '$INSTALL_SFTP' = true ]; then
-    echo "  SFTP:          root@${PUBLIC_IP}  (password: tester)"
-    echo "  WinSCP:        https://dcus.short.gy/downloadWinSCP"
-fi
-if [ '$INSTALL_VSCODE' = true ]; then
-    echo "  VS Code:       http://${PUBLIC_IP}:8080"
-    echo "                 Or SSH in and run: sudo code tunnel"
-fi
-if [ '$INSTALL_DB' = true ]; then
-    echo "  Adminer:       http://${PUBLIC_IP}/adminer/?username=admin"
-    echo "  phpMyAdmin:    http://${PUBLIC_IP}/phpmyadmin"
-fi
-if [ '$INSTALL_WORDPRESS' = true ]; then
-    echo "  WordPress:     http://${PUBLIC_IP}"
-    echo "  WP Admin:      http://${PUBLIC_IP}/wp-admin  (admin / password)"
-fi
-if [ '$INSTALL_MATOMO' = true ]; then
-    echo "  Matomo:        http://${PUBLIC_IP}/matomo"
-fi
-
-echo ""
-echo "=================================================="
 '
+
+###########################################
+# Final Status Summary
+###########################################
+step "Deployment complete"
+PUBLIC_IP="$ELASTIC_IP"
+ok "SSH access: ssh vm"
+if [ "$INSTALL_LAMP" = true ]; then
+    ok "Website: http://${PUBLIC_IP}"
+fi
+if [ "$INSTALL_SFTP" = true ]; then
+    ok "SFTP: root@${PUBLIC_IP}  (password: tester)"
+    info "WinSCP: https://dcus.short.gy/downloadWinSCP"
+fi
+if [ "$INSTALL_VSCODE" = true ]; then
+    ok "VS Code: http://${PUBLIC_IP}:8080"
+    info "Or SSH in and run: sudo code tunnel"
+fi
+if [ "$INSTALL_DB" = true ]; then
+    ok "Adminer: http://${PUBLIC_IP}/adminer/?username=admin"
+    ok "phpMyAdmin: http://${PUBLIC_IP}/phpmyadmin"
+fi
+if [ "$INSTALL_WORDPRESS" = true ]; then
+    ok "WordPress: http://${PUBLIC_IP}"
+    ok "WP Admin: http://${PUBLIC_IP}/wp-admin  (admin / password)"
+fi
+if [ "$INSTALL_MATOMO" = true ]; then
+    ok "Matomo: http://${PUBLIC_IP}/matomo"
+fi
 else
     note "No installation flags provided — instance is ready but no software was installed"
 fi
