@@ -40,17 +40,73 @@ INSTALL_MATOMO=false
 # Helper Functions
 ###########################################
 
-# Display an animated spinner with a message (call in a loop)
-show_spinner() {
-    local message="$1"
-    echo -en "\r\033[K$message"
-    for cursor in '/' '-' '\' '|'; do
-        echo -en "\b$cursor"
-        sleep 0.5
+# --- Formatted output helpers ---
+# Colours & symbols used throughout the script for uniform output.
+readonly  CLR="\033[0m"
+readonly  BOLD="\033[1m"
+readonly  DIM="\033[2m"
+readonly  GREEN="\033[32m"
+readonly  YELLOW="\033[33m"
+readonly  BLUE="\033[34m"
+readonly  RED="\033[31m"
+readonly  CYAN="\033[36m"
+readonly  CHECK="${GREEN}✔${CLR}"
+readonly  CROSS="${RED}✘${CLR}"
+readonly  ARROW="${CYAN}➜${CLR}"
+readonly  DOT="${DIM}·${CLR}"
+
+# Current step counter (auto-incremented by step())
+STEP_NUM=0
+
+# Print a numbered section header:  [1] Cleaning up instances
+step() {
+    STEP_NUM=$((STEP_NUM + 1))
+    printf "\n${BOLD}${BLUE}[%d]${CLR} ${BOLD}%s${CLR}\n" "$STEP_NUM" "$1"
+}
+
+# Print an info sub-line:  ➜ Reusing key pair
+info() { printf "  ${ARROW} %s\n" "$1"; }
+
+# Print a success sub-line:  ✔ Security group created
+ok() { printf "  ${CHECK} %s\n" "$1"; }
+
+# Print a warning:  · No existing instances found
+note() { printf "  ${DOT} %s\n" "$1"; }
+
+# Print an error and exit
+die() { printf "\n  ${CROSS} ${RED}%s${CLR}\n" "$1"; exit 1; }
+
+# Display a spinner on a single line while waiting.
+# Usage:  spinner "Waiting for instance" &  SPIN_PID=$!
+#         ... do work ...
+#         stop_spinner
+SPIN_PID=""
+spinner() {
+    local msg="$1"
+    local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+    local i=0
+    tput civis 2>/dev/null  # hide cursor
+    while true; do
+        printf "\r  ${YELLOW}%s${CLR} %s " "${frames[$i]}" "$msg"
+        i=$(( (i + 1) % ${#frames[@]} ))
+        sleep 0.12
     done
 }
 
-# Retry a command with exponential backoff (base 5s * 2^attempt)
+stop_spinner() {
+    if [ -n "$SPIN_PID" ] && kill -0 "$SPIN_PID" 2>/dev/null; then
+        kill "$SPIN_PID" 2>/dev/null
+        wait "$SPIN_PID" 2>/dev/null || true
+        SPIN_PID=""
+        printf "\r\033[K"  # clear spinner line
+        tput cnorm 2>/dev/null  # restore cursor
+    fi
+}
+
+# Ensure cursor is restored on exit
+trap 'stop_spinner; tput cnorm 2>/dev/null' EXIT
+
+# Retry a command with exponential backoff (base 5s × 2^attempt)
 # Usage: retry_command "aws ec2 ..." "create instance" 3
 retry_command() {
     local cmd="$1"
@@ -59,24 +115,18 @@ retry_command() {
     local attempt=1
     local output=""
 
-    echo "Attempting to $description..."
     while [ "$attempt" -le "$max_attempts" ]; do
-        echo " - Attempt $attempt/$max_attempts"
         if output=$(eval "$cmd" 2>&1); then
-            echo " - Success: $description"
             echo "$output"
             return 0
         fi
-
         local wait_time=$((2 ** (attempt - 1) * 5))
-        echo " - Failed. Waiting ${wait_time}s before retrying..."
+        note "Attempt $attempt/$max_attempts failed — retrying in ${wait_time}s…"
         sleep "$wait_time"
         attempt=$((attempt + 1))
     done
 
-    echo "Failed to $description after $max_attempts attempts. Exiting..."
-    echo "Last error: $output"
-    return 1
+    die "Failed to $description after $max_attempts attempts"
 }
 
 ###########################################
@@ -129,277 +179,221 @@ done
 ###########################################
 # Cleanup Phase
 ###########################################
-printf "\e[3;4;31mStarting cleanup of AWS resources...\e[0m\n"
+printf "\n${BOLD}${CYAN}  AWS LAMP Stack Deployment${CLR}\n"
+printf "${DIM}  ─────────────────────────${CLR}\n"
 
-# 1. Clean up Elastic IPs — disassociate from old instances so we can reuse
-echo "1. Checking for existing Elastic IPs..."
+step "Checking for existing Elastic IPs"
 EXISTING_ELASTIC_IP_ALLOCATION_IDS=$(aws ec2 describe-tags \
     --filters "Name=key,Values=Name" "Name=value,Values=${ELASTIC_IP_TAG_NAME}" "Name=resource-type,Values=elastic-ip" \
     --query 'Tags[*].ResourceId' --output text) || true
 if [ -n "$EXISTING_ELASTIC_IP_ALLOCATION_IDS" ]; then
-    echo " - Found existing Elastic IPs, checking availability..."
     for ALLOCATION_ID in $EXISTING_ELASTIC_IP_ALLOCATION_IDS; do
         ASSOC_ID=$(aws ec2 describe-addresses --allocation-ids "$ALLOCATION_ID" \
             --query 'Addresses[0].AssociationId' --output text) || true
         if [ -z "$ASSOC_ID" ] || [ "$ASSOC_ID" = "None" ]; then
-            # Already free — reuse it directly
-            echo " - Found available Elastic IP: $ALLOCATION_ID"
             REUSE_ALLOCATION_ID=$ALLOCATION_ID
             break
         else
-            # Disassociate from the old instance so we can reuse it
-            echo " - Disassociating Elastic IP $ALLOCATION_ID from old instance..."
             aws ec2 disassociate-address --association-id "$ASSOC_ID" > /dev/null 2>&1 || true
             REUSE_ALLOCATION_ID=$ALLOCATION_ID
             break
         fi
     done
+    ok "Found existing Elastic IP — will reuse"
 else
-    echo " - No existing Elastic IPs found"
+    note "No existing Elastic IP found — will create one"
 fi
 
-# 2. Clean up EC2 instances
-echo "2. Cleaning up EC2 instances..."  
+step "Cleaning up old EC2 instances"
 EXISTING_INSTANCE_IDS=$(aws ec2 describe-instances \
     --filters "Name=tag:Name,Values=${INSTANCE_TAG_NAME}" "Name=instance-state-name,Values=running,pending,stopping,stopped" \
     --query 'Reservations[*].Instances[*].InstanceId' --output text) || true
 if [ -n "$EXISTING_INSTANCE_IDS" ]; then
-    echo " - Found existing instances, renaming before termination..."
-    # Rename instances by adding "-deleting" suffix to avoid naming conflicts
     for INSTANCE_ID in $EXISTING_INSTANCE_IDS; do
         aws ec2 create-tags --resources "$INSTANCE_ID" --tags "Key=Name,Value=${INSTANCE_TAG_NAME}-deleting" > /dev/null
-        echo " - Renamed instance $INSTANCE_ID to ${INSTANCE_TAG_NAME}-deleting"
     done
-    
-    echo " - Initiating termination for instances: $EXISTING_INSTANCE_IDS"
     aws ec2 terminate-instances --instance-ids $EXISTING_INSTANCE_IDS > /dev/null
-    echo " - Termination initiated, continuing with script execution..."
+    ok "Terminated previous instance(s)"
 else
-    echo " - No existing instances found"
+    note "No existing instances to clean up"
 fi
 
-# 3. Check for existing security group to reuse (avoids duplicate creation errors)
-echo "3. Checking for existing security groups..."
+step "Checking security group"
 EXISTING_SG_ID=$(aws ec2 describe-security-groups --group-names "${SECURITY_GROUP_NAME}" \
     --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null) || true
 if [ -n "$EXISTING_SG_ID" ] && [ "$EXISTING_SG_ID" != "None" ]; then
-    echo " - Found existing security group with ID: $EXISTING_SG_ID"
     SG_ID="$EXISTING_SG_ID"
-    echo " - Will reuse existing security group"
+    ok "Reusing existing security group"
 else
-    echo " - No existing security group found with name ${SECURITY_GROUP_NAME}"
+    note "No existing security group — will create one"
 fi
 
-# 4. Managing SSH keys...
-echo "4. Managing SSH keys..."
+step "Preparing SSH key pair"
 # Create .ssh directory with proper permissions if it doesn't exist
 if [ ! -d ~/.ssh ]; then
-    echo " - Creating ~/.ssh directory"
     mkdir -p ~/.ssh
     chmod 700 ~/.ssh
 fi
 
-# Check for existing known_hosts and config, remove if needed
-if [ -f ~/.ssh/known_hosts ]; then
-    rm -f ~/.ssh/known_hosts
-fi
-if [ -f ~/.ssh/config ]; then
-    rm -f ~/.ssh/config
-fi
+# Clean stale entries from previous runs
+rm -f ~/.ssh/known_hosts ~/.ssh/config
 
 # Check for existing key pair with the same name
 KEY_EXISTS=$(aws ec2 describe-key-pairs --key-names "${SSH_KEY_NAME}" --query 'KeyPairs[0].KeyName' --output text 2>/dev/null) || true
 if [ "$KEY_EXISTS" = "${SSH_KEY_NAME}" ]; then
-    echo " - Found existing key pair with name: ${SSH_KEY_NAME}"
-    # Check if the private key file exists locally
     if [ -f ~/.ssh/${SSH_KEY_NAME} ]; then
-        echo " - Found local private key file, will reuse it"
+        ok "Reusing existing key pair"
         REUSE_KEY=true
     else
-        echo " - Local private key file not found, deleting remote key pair to recreate"
+        info "Local key file missing — recreating key pair"
         aws ec2 delete-key-pair --key-name ${SSH_KEY_NAME}
         REUSE_KEY=false
     fi
 else
-    echo " - No existing key pair found with name: ${SSH_KEY_NAME}"
+    note "No existing key pair — will create one"
     REUSE_KEY=false
 fi
-
-echo " - Will use SSH key with name: ${SSH_KEY_NAME}"
 
 ###########################################
 # Resource Creation Phase
 ###########################################
 
 # 1. Create and configure SSH key pair
+step "Setting up SSH key pair"
 if [ "$REUSE_KEY" = true ]; then
-    echo "Reusing existing key pair: ${SSH_KEY_NAME}..."
-    # Make sure the permissions are correct
     chmod 600 ~/.ssh/${SSH_KEY_NAME}
+    ok "Key pair ready"
 else
-    echo "Creating new key pair: ${SSH_KEY_NAME}..."
-    # Create temporary file for key
     KEY_FILE=$(mktemp)
     if aws ec2 create-key-pair --key-name ${SSH_KEY_NAME} --query 'KeyMaterial' --output text > $KEY_FILE 2>/dev/null; then
-        # Move the key to .ssh directory and set permissions
         mv $KEY_FILE ~/.ssh/${SSH_KEY_NAME}
         chmod 600 ~/.ssh/${SSH_KEY_NAME}
-        echo " - Key pair created successfully and stored at ~/.ssh/${SSH_KEY_NAME}"
+        ok "New key pair created and saved"
     else
-        echo " - Failed to create key pair. Cleaning up..."
         rm -f $KEY_FILE
-        exit 1
+        die "Failed to create key pair"
     fi
 fi
 
 # 2. Create or reuse security group (ports are verified/added below regardless)
+step "Configuring security group"
 if [ -n "${SG_ID:-}" ]; then
-    echo "Reusing existing security group: $SG_ID"
-    echo " - Security group already exists, skipping creation"
+    ok "Reusing existing security group"
 else
-    echo "Creating security group ${SECURITY_GROUP_NAME}..."
-    # Create the security group with original name
     SG_ID=$(aws ec2 create-security-group --group-name ${SECURITY_GROUP_NAME} \
         --description "Web Server security group" --query 'GroupId' --output text 2>/dev/null)
 
     if [ -z "$SG_ID" ]; then
-        echo " - First attempt failed, retrying with backoff..."
-        # Retry with exponential backoff
         for i in $(seq 1 $MAX_RETRIES); do
             wait_time=$((2 ** i))
-            echo " - Waiting ${wait_time} seconds before retry $i..."
+            note "Retrying in ${wait_time}s… (attempt $i/$MAX_RETRIES)"
             sleep $wait_time
-            
             SG_ID=$(aws ec2 create-security-group --group-name ${SECURITY_GROUP_NAME} \
                 --description "Web Server security group" --query 'GroupId' --output text 2>/dev/null)
-                
-            if [ -n "$SG_ID" ]; then
-                echo " - Successfully created security group on attempt $i"
-                break
-            fi
-            
-            if [ $i -eq $MAX_RETRIES ]; then
-                echo "Failed to create security group after $MAX_RETRIES attempts. Exiting..."
-                exit 1
-            fi
+            [ -n "$SG_ID" ] && break
+            [ $i -eq $MAX_RETRIES ] && die "Failed to create security group after $MAX_RETRIES attempts"
         done
     fi
 
-    echo "Successfully created security group: $SG_ID"
     aws ec2 create-tags --resources "$SG_ID" --tags "Key=Name,Value=${SECURITY_GROUP_NAME}" > /dev/null
+    ok "Security group created"
 fi
 
 # Ensure all required ports are open (idempotent — skips ports already open)
-echo "Verifying required ports..."
-
-# Open a port if it isn't already allowed for 0.0.0.0/0.
-# Uses authorize-security-group-ingress which is a no-op error when the rule exists,
-# so we just suppress that specific error.
 open_port_if_needed() {
     local port="$1"
     local label="$2"
-    if ! aws ec2 authorize-security-group-ingress --group-id "$SG_ID" \
-        --protocol tcp --port "$port" --cidr 0.0.0.0/0 > /dev/null 2>&1; then
-        echo " - $label (port $port) already open"
-    else
-        echo " - Opened $label (port $port)"
-    fi
+    aws ec2 authorize-security-group-ingress --group-id "$SG_ID" \
+        --protocol tcp --port "$port" --cidr 0.0.0.0/0 > /dev/null 2>&1 || true
 }
-
 open_port_if_needed 22   "SSH"
 open_port_if_needed 80   "HTTP"
 open_port_if_needed 443  "HTTPS"
 open_port_if_needed 8080 "Code Server"
+ok "Ports open: 22 (SSH), 80 (HTTP), 443 (HTTPS), 8080 (Code Server)"
 
 # 3. Launch EC2 instance using standard Amazon Linux 2023 AMI
-echo "Retrieving the latest Amazon Linux 2023 AMI using SSM parameter..."
+step "Launching EC2 instance"
+info "Resolving latest Amazon Linux 2023 AMI…"
 AMI_ID=$(aws ssm get-parameter --name "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64" --query "Parameter.Value" --output text)
-echo "Using AMI ID: $AMI_ID"
-echo "Creating instance..."
+
 INSTANCE_ID=$(aws ec2 run-instances --image-id "$AMI_ID" --count 1 --instance-type "$INSTANCE_TYPE" \
     --key-name ${SSH_KEY_NAME} --security-group-ids "$SG_ID" \
     --block-device-mappings '[{"DeviceName":"/dev/xvda","Ebs":{"VolumeSize":10,"VolumeType":"gp3"}}]' \
     --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${INSTANCE_TAG_NAME}}]" \
                         "ResourceType=volume,Tags=[{Key=Name,Value=volWebServerAuto}]" \
     --query 'Instances[0].InstanceId' --output text)
-if [ -z "$INSTANCE_ID" ]; then
-    echo "Failed to create instance"
-    exit 1
-fi
+[ -z "$INSTANCE_ID" ] && die "Failed to launch instance"
+ok "Instance launched (${INSTANCE_TYPE})"
 
-echo "Waiting for instance to be ready..."
+# Wait for the instance to reach the "running" state
+spinner "Waiting for instance to start…" &
+SPIN_PID=$!
 start_time=$(date +%s)
 while true; do
-    current_time=$(date +%s)
-    elapsed_time=$((current_time - start_time))
-    if [ $elapsed_time -gt $TIMEOUT ]; then
-        echo -e "\nTimeout waiting for instance to be ready after $((TIMEOUT/60)) minutes"
-        exit 1
-    fi
+    elapsed=$(( $(date +%s) - start_time ))
+    [ $elapsed -gt $TIMEOUT ] && { stop_spinner; die "Timed out after ${TIMEOUT}s waiting for instance"; }
     STATE=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" --query 'Reservations[0].Instances[0].State.Name' --output text)
-    printf "\rCurrent state: %-10s Time: %ds" "$STATE" "$elapsed_time"
     if [ "$STATE" = "running" ]; then
-        echo -e "\nInstance is running..."
+        stop_spinner
+        ok "Instance is running"
         sleep 10
         break
     elif [ "$STATE" = "terminated" ] || [ "$STATE" = "shutting-down" ]; then
-        echo -e "\nError: Instance terminated unexpectedly"
-        exit 1
+        stop_spinner
+        die "Instance terminated unexpectedly"
     fi
     sleep 2
 done
 
 # 4. Configure Elastic IP
+step "Assigning Elastic IP"
 if [ -n "${REUSE_ALLOCATION_ID:-}" ]; then
-    echo "Reusing existing Elastic IP..."
     ALLOCATION_ID=$REUSE_ALLOCATION_ID
+    info "Reusing existing Elastic IP"
 else
-    echo "Allocating a new Elastic IP..."
     ALLOCATION_ID=$(aws ec2 allocate-address --domain vpc --query 'AllocationId' --output text)
-    echo "Tagging Elastic IP..."
     aws ec2 create-tags --resources "$ALLOCATION_ID" --tags Key=Name,Value=${ELASTIC_IP_TAG_NAME}
+    info "Allocated new Elastic IP"
 fi
 
-echo "Getting Elastic IP address..."
 ELASTIC_IP=$(aws ec2 describe-addresses --allocation-ids "$ALLOCATION_ID" --query 'Addresses[0].PublicIp' --output text)
-echo "Associating Elastic IP with the new instance..."
 aws ec2 associate-address --instance-id "$INSTANCE_ID" --allocation-id "$ALLOCATION_ID" > /dev/null
-echo "Host vm configuration added to ~/.ssh/config:"
+ok "Elastic IP ${ELASTIC_IP} attached to instance"
+
+# 5. Configure SSH client
+step "Configuring local SSH"
 echo "Host vm
     HostName $ELASTIC_IP
     User ec2-user
     IdentityFile ~/.ssh/${SSH_KEY_NAME}" > ~/.ssh/config
 chmod 600 ~/.ssh/config
 
-# Before SSH connection attempt, confirm key file exists
-if [ ! -f ~/.ssh/${SSH_KEY_NAME} ]; then
-    echo "Error: SSH key file not found at ~/.ssh/${SSH_KEY_NAME}"
-    exit 1
-fi
+[ ! -f ~/.ssh/${SSH_KEY_NAME} ] && die "SSH key file not found at ~/.ssh/${SSH_KEY_NAME}"
 
-# Verify key file permissions before connecting
-ls -la ~/.ssh/${SSH_KEY_NAME}
+ok "SSH config written — you can connect with: ssh vm"
 
 # Wait for SSH to become available on the new instance.
 # StrictHostKeyChecking=no is used because this is a freshly created instance
 # with no prior host key — the Elastic IP may have been reused from a previous run.
-echo "Attempting to establish SSH connection..."
+spinner "Waiting for SSH to become available…" &
+SPIN_PID=$!
 count=0
 while ! ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -i ~/.ssh/${SSH_KEY_NAME} ec2-user@"$ELASTIC_IP" 'exit' 2>/dev/null; do
     count=$((count+1))
-    printf "\rAttempt %d/%d " "$count" "$MAX_RETRIES"
-    if [ "$count" -eq "$MAX_RETRIES" ]; then
-        echo -e "\nFailed to establish SSH connection after $MAX_RETRIES attempts"
-        exit 1
+    if [ "$count" -ge "$MAX_RETRIES" ]; then
+        stop_spinner
+        die "Could not connect via SSH after $MAX_RETRIES attempts"
     fi
     sleep 2
 done
-echo -e "\nSSH connection established!"
+stop_spinner
+ok "SSH connection verified"
 
 ###########################################
 # Installation Phase
 ###########################################
-echo "Starting software installation..."
+step "Installing software on remote instance"
 ssh -o StrictHostKeyChecking=no -i ~/.ssh/${SSH_KEY_NAME} ec2-user@$ELASTIC_IP 'set -e
 
 #----------------
@@ -542,29 +536,38 @@ fi
 ###########################################
 # Final Status Output
 ###########################################
+PUBLIC_IP=$(curl -s ifconfig.me)
+
+echo ""
+echo "=================================================="
+echo "  Deployment complete!"
+echo "=================================================="
+echo ""
+echo "  SSH access:    ssh vm"
+
 if [ '$INSTALL_LAMP' = true ]; then
-    printf "\nClick on this link to open your website: \e[3;4;33mhttp://$(curl -s ifconfig.me)\e[0m\n"
+    echo "  Website:       http://${PUBLIC_IP}"
 fi
 if [ '$INSTALL_SFTP' = true ]; then
-    printf "\nClick on this link to download WinSCP: \e[3;4;33mhttps://dcus.short.gy/downloadWinSCP\e[0m - Note: User name = root and password = tester\n"
+    echo "  SFTP:          root@${PUBLIC_IP}  (password: tester)"
+    echo "  WinSCP:        https://dcus.short.gy/downloadWinSCP"
 fi
 if [ '$INSTALL_VSCODE' = true ]; then
-    printf "\nSSH into your new VM (ssh vm) and run this command to open a VS Code tunnel: \e[3;4;33msudo code tunnel\e[0m\nFollow the instructions in the terminal to connect via your browser.\n"
-    printf "\nYou can also access VS Code online by visiting: \e[3;4;33mhttp://$(curl -s ifconfig.me):8080\e[0m \n"
+    echo "  VS Code:       http://${PUBLIC_IP}:8080"
+    echo "                 Or SSH in and run: sudo code tunnel"
 fi
-if [ '$INSTALL_DB' = true ]; then    
-    printf "\nOpen an internet browser and go to: \e[3;4;33mhttp://$(curl -s ifconfig.me)/adminer/?username=admin\e[0m - Adminer Login page (username: admin, password: password)\n"
-    printf "\nOpen an internet browser and go to: \e[3;4;33mhttp://$(curl -s ifconfig.me)/phpmyadmin\e[0m - phpMyAdmin Login page (admin/password)\n"
+if [ '$INSTALL_DB' = true ]; then
+    echo "  Adminer:       http://${PUBLIC_IP}/adminer/?username=admin"
+    echo "  phpMyAdmin:    http://${PUBLIC_IP}/phpmyadmin"
 fi
 if [ '$INSTALL_WORDPRESS' = true ]; then
-    printf "\nOpen an internet browser and go to: \e[3;4;33mhttp://$(curl -s ifconfig.me)\e[0m - You should see the WordPress page.\n"
-    printf "\nAccess the WordPress Dashboard at: \e[3;4;33mhttp://$(curl -s ifconfig.me)/wp-admin\e[0m (credentials: admin/password)\n"
+    echo "  WordPress:     http://${PUBLIC_IP}"
+    echo "  WP Admin:      http://${PUBLIC_IP}/wp-admin  (admin / password)"
 fi
 if [ '$INSTALL_MATOMO' = true ]; then
-    printf "\nOpen an internet browser and go to: \e[3;4;33mhttp://$(curl -s ifconfig.me)/matomo\e[0m - Matomo Install page.\n"
+    echo "  Matomo:        http://${PUBLIC_IP}/matomo"
 fi
-printf "\nYou can SSH into your new VM on this Cloud Shell using: \e[3;4;33mssh vm\e[0m\n"
-echo "********************************"
-echo "* SUCCESS! - Script completed! *"
-echo "********************************"
+
+echo ""
+echo "=================================================="
 '
