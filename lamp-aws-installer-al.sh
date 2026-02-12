@@ -396,8 +396,9 @@ stop_spinner
 ok "SSH connection verified"
 
 ###########################################
-# Installation Phase
+# Installation Phase (skipped when no flags)
 ###########################################
+if [ "$INSTALL_LAMP" = true ]; then
 step "Installing software on remote instance"
 ssh -o StrictHostKeyChecking=no -i ~/.ssh/${SSH_KEY_NAME} ec2-user@$ELASTIC_IP 'set -e
 
@@ -576,3 +577,6 @@ fi
 echo ""
 echo "=================================================="
 '
+else
+    note "No installation flags provided — instance is ready but no software was installed"
+fi
