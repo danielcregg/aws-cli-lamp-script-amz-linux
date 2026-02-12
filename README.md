@@ -2,17 +2,22 @@
 
 Automates the deployment of a LAMP stack (Linux, Apache, MariaDB, PHP) on an AWS EC2 instance running Amazon Linux 2023. The script handles all AWS resource creation, software installation, and configuration in a single command.
 
+## Scripts
+
+This repo contains two scripts:
+
+| Script | Purpose |
+|--------|---------|
+| `lamp-aws-installer-al.sh` | **Main script** — creates AWS infrastructure (EC2, security group, key pair, Elastic IP) and deploys a LAMP stack with optional extras like WordPress and Matomo |
+| `aws_cli_installer.sh` | **One-time setup helper** — installs AWS CLI v2 on your local machine, sets the default region to `eu-west-1`, and prompts you to enter your AWS credentials |
+
+Run `aws_cli_installer.sh` first if you don't already have the AWS CLI installed, then use `lamp-aws-installer-al.sh` to deploy.
+
 ## Prerequisites
 
-- **AWS CLI** installed and configured with valid credentials (`aws configure`)
+- **AWS CLI** installed and configured with valid credentials (run `aws_cli_installer.sh` or `aws configure`)
 - **AWS IAM permissions** for EC2, VPC, Elastic IP, SSM parameter read, and key pair management
 - **Bash** shell with `curl` and `ssh` available
-
-If you need to install the AWS CLI, you can use the included helper script:
-
-```bash
-bash aws_cli_installer.sh
-```
 
 ## Quick Start
 
