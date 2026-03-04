@@ -8,11 +8,12 @@ A single-command automation script that provisions AWS infrastructure and deploy
 
 ## Overview
 
-This project contains two Bash scripts that streamline the process of standing up a web server on AWS. The main deployment script handles everything from EC2 instance creation to software installation, while a helper script takes care of AWS CLI setup.
+This project contains three Bash scripts that streamline the process of standing up a web server on AWS. The main deployment script handles everything from EC2 instance creation to software installation, an HTTPS add-on configures an ALB with TLS, and a helper script takes care of AWS CLI setup.
 
 | Script | Purpose |
 |--------|---------|
 | `lamp-aws-installer-al.sh` | **Main script** -- creates AWS infrastructure (EC2, security group, key pair, Elastic IP) and deploys a LAMP stack with optional extras like WordPress and Matomo |
+| `alb-https-installer.sh` | **HTTPS add-on** -- adds an Application Load Balancer with ACM TLS certificate, Route 53 DNS, and HTTPS to an existing deployment |
 | `aws_cli_installer.sh` | **One-time setup helper** -- installs AWS CLI v2 on your local machine, sets the default region to `eu-west-1`, and prompts you to enter your AWS credentials |
 
 ## Features
@@ -30,7 +31,7 @@ This project contains two Bash scripts that streamline the process of standing u
 ## Prerequisites
 
 - **AWS CLI** installed and configured with valid credentials (run `aws_cli_installer.sh` or `aws configure`)
-- **AWS IAM permissions** for EC2, VPC, Elastic IP, SSM parameter read, and key pair management
+- **AWS IAM permissions** for EC2, VPC, Elastic IP, SSM parameter read, and key pair management (the HTTPS script additionally requires Route 53, ACM, and Elastic Load Balancing permissions)
 - **Bash** shell with `curl`, `unzip`, and `ssh` available
 
 ## Getting Started
@@ -80,6 +81,16 @@ bash <(curl -sL https://raw.githubusercontent.com/danielcregg/aws-cli-lamp-scrip
 bash <(curl -sL https://raw.githubusercontent.com/danielcregg/aws-cli-lamp-script-amz-linux/refs/heads/main/lamp-aws-installer-al.sh) -mt
 ```
 
+### Adding HTTPS with an ALB
+
+After running the main script with `-wp`, add HTTPS by running:
+
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/danielcregg/aws-cli-lamp-script-amz-linux/refs/heads/main/alb-https-installer.sh)
+```
+
+The script will prompt for your domain name, set up Route 53 DNS, provision an ACM certificate, create an ALB, and update WordPress URLs automatically.
+
 ### Connecting to the Instance
 
 After the script completes, connect via:
@@ -97,7 +108,12 @@ This works because the script adds a host entry to `~/.ssh/config`.
 | EC2 Instance | `t2.medium`, 10 GB gp3 volume, Amazon Linux 2023 |
 | Security Group | `sgWebServerAuto` -- ports 22, 80, 443, 8080 open |
 | Key Pair | `keyWebServerAuto` -- stored at `~/.ssh/keyWebServerAuto` |
-| Elastic IP | `elasticIPWebServerAuto` -- reused across runs |
+| Elastic IP | `eipWebServerAuto` -- reused across runs |
+| ALB | `albWebServerAuto` -- internet-facing, HTTPS termination |
+| ALB Security Group | `sgAlbWebServerAuto` -- ports 80, 443 open |
+| Target Group | `tgWebServerAuto` -- HTTP:80, health check on `/` |
+| ACM Certificate | DNS-validated TLS certificate for your domain |
+| Route 53 Hosted Zone | DNS zone with NS, A (alias to ALB), and validation CNAME records |
 
 On subsequent runs, the script automatically cleans up previous instances and reuses existing Elastic IPs and security groups.
 
@@ -115,7 +131,7 @@ On subsequent runs, the script automatically cleans up previous instances and re
 ## Tech Stack
 
 - **Shell:** Bash with strict mode (`set -euo pipefail`)
-- **Cloud Platform:** AWS (EC2, VPC, Elastic IP, SSM)
+- **Cloud Platform:** AWS (EC2, VPC, Elastic IP, SSM, ALB, ACM, Route 53)
 - **Web Server:** Apache HTTP Server
 - **Database:** MariaDB
 - **Language:** PHP
