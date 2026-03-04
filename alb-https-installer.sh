@@ -493,9 +493,7 @@ rstop; rok "PHP installed"
 
 rspin "Configuring web server"
 sudo sed -i.bak -e "s/DirectoryIndex index.html/DirectoryIndex index.php index.html/" /etc/httpd/conf/httpd.conf || true
-sudo dnf install -y wget > /dev/null 2>&1
-sudo wget -q https://raw.githubusercontent.com/danielcregg/simple-php-website/main/index.php -P /var/www/html/
-sudo rm -f /var/www/html/index.html
+
 sudo chown -R apache:apache /var/www
 sudo systemctl enable --now httpd > /dev/null 2>&1
 sudo systemctl enable --now mariadb > /dev/null 2>&1
@@ -531,24 +529,6 @@ rspin "Installing PHP extensions"
 sudo dnf install -y php php-mysqlnd php-gd php-curl php-dom php-mbstring php-zip php-intl > /dev/null 2>&1
 rstop; rok "PHP extensions installed"
 
-rspin "Compiling PHP Imagick from source (this may take a minute)"
-sudo dnf check-release-update > /dev/null 2>&1 || true
-sudo dnf upgrade --releasever=latest -y > /dev/null 2>&1
-sudo dnf install -y php-devel php-pear gcc ImageMagick ImageMagick-devel > /dev/null 2>&1
-pecl download Imagick > /dev/null 2>&1
-tar -xf imagick*.tgz
-IMAGICK_DIR=$(find . -type d -name "imagick*" | head -1)
-cd "$IMAGICK_DIR"
-phpize > /dev/null 2>&1
-./configure > /dev/null 2>&1
-make > /dev/null 2>&1
-sudo make install > /dev/null 2>&1
-echo "extension=imagick.so" | sudo tee /etc/php.d/25-imagick.ini > /dev/null
-sudo systemctl restart php-fpm 2>/dev/null || true
-sudo systemctl restart httpd > /dev/null 2>&1
-cd ..
-rm -rf imagick*
-rstop; rok "Imagick compiled and loaded"
 
 rspin "Creating WordPress database"
 sudo mysql -Bse "CREATE USER IF NOT EXISTS wordpressuser@localhost IDENTIFIED BY '\''password'\'';GRANT ALL PRIVILEGES ON *.* TO wordpressuser@localhost;FLUSH PRIVILEGES;" 2>/dev/null

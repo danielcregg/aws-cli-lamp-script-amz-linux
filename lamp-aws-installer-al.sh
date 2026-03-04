@@ -468,9 +468,7 @@ if [ '"$INSTALL_LAMP"' = true ]; then
 
     rspin "Configuring web server"
     sudo sed -i.bak -e "s/DirectoryIndex index.html/DirectoryIndex index.php index.html/" /etc/httpd/conf/httpd.conf || true
-    sudo dnf install -y wget > /dev/null 2>&1
-    sudo wget -q https://raw.githubusercontent.com/danielcregg/simple-php-website/main/index.php -P /var/www/html/
-    sudo rm -f /var/www/html/index.html
+
     sudo chown -R apache:apache /var/www
     sudo systemctl enable --now httpd > /dev/null 2>&1
     sudo systemctl enable --now mariadb > /dev/null 2>&1
