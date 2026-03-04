@@ -101,6 +101,19 @@ trap 'stop_spinner; tput cnorm 2>/dev/null' EXIT
 # OSC 8 clickable hyperlink
 link() { printf "\033]8;;%s\033\\%s\033]8;;\033\\" "$1" "$1"; }
 
+# Set private-key file permissions (works on both Windows/NTFS and Unix)
+secure_key() {
+    local kf="$1"
+    chmod 600 "$kf" 2>/dev/null || true
+    # On Windows, chmod alone is not enough — SSH checks NTFS ACLs
+    if command -v icacls.exe > /dev/null 2>&1; then
+        local win_path
+        win_path=$(cygpath -w "$kf" 2>/dev/null || echo "$kf")
+        icacls.exe "$win_path" /inheritance:r > /dev/null 2>&1 || true
+        icacls.exe "$win_path" /grant:r "${USERNAME}:F" > /dev/null 2>&1 || true
+    fi
+}
+
 # Open a port on a security group (idempotent — ignores duplicates, fails on real errors)
 open_sg_port() {
     local sg_id="$1"
@@ -271,7 +284,7 @@ rm -f ~/.ssh/known_hosts ~/.ssh/config
 KEY_EXISTS=$(aws ec2 describe-key-pairs --key-names "${SSH_KEY_NAME}" --query 'KeyPairs[0].KeyName' --output text 2>/dev/null) || true
 if [ "$KEY_EXISTS" = "${SSH_KEY_NAME}" ]; then
     if [ -f ~/.ssh/${SSH_KEY_NAME} ]; then
-        chmod 600 ~/.ssh/${SSH_KEY_NAME}
+        secure_key ~/.ssh/${SSH_KEY_NAME}
         ok "Reusing existing key pair"
     else
         info "Local key file missing — recreating key pair"
@@ -279,7 +292,7 @@ if [ "$KEY_EXISTS" = "${SSH_KEY_NAME}" ]; then
         KEY_FILE=$(mktemp)
         if aws ec2 create-key-pair --key-name "${SSH_KEY_NAME}" --query 'KeyMaterial' --output text > "$KEY_FILE" 2>/dev/null; then
             mv "$KEY_FILE" ~/.ssh/${SSH_KEY_NAME}
-            chmod 600 ~/.ssh/${SSH_KEY_NAME}
+            secure_key ~/.ssh/${SSH_KEY_NAME}
             ok "New key pair created and saved"
         else
             rm -f "$KEY_FILE"
@@ -291,7 +304,7 @@ else
     KEY_FILE=$(mktemp)
     if aws ec2 create-key-pair --key-name "${SSH_KEY_NAME}" --query 'KeyMaterial' --output text > "$KEY_FILE" 2>/dev/null; then
         mv "$KEY_FILE" ~/.ssh/${SSH_KEY_NAME}
-        chmod 600 ~/.ssh/${SSH_KEY_NAME}
+        secure_key ~/.ssh/${SSH_KEY_NAME}
         ok "New key pair created and saved"
     else
         rm -f "$KEY_FILE"
