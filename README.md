@@ -4,16 +4,16 @@
 ![AWS](https://img.shields.io/badge/AWS-232F3E?style=flat-square&logo=amazonwebservices&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)
 
-A single-command automation script that provisions AWS infrastructure and deploys a full LAMP stack (Linux, Apache, MariaDB, PHP) on an Amazon Linux 2023 EC2 instance, with optional extras including WordPress, VS Code Server, and Matomo Analytics.
+Single-command automation scripts that provision AWS infrastructure and deploy web servers on Amazon Linux 2023 EC2 instances.
 
 ## Overview
 
-This project contains three Bash scripts that streamline the process of standing up a web server on AWS. The main deployment script handles everything from EC2 instance creation to software installation, an HTTPS add-on configures an ALB with TLS, and a helper script takes care of AWS CLI setup.
+This project contains three Bash scripts that streamline the process of standing up a web server on AWS.
 
 | Script | Purpose |
 |--------|---------|
-| `lamp-aws-installer-al.sh` | **Main script** -- creates AWS infrastructure (EC2, security group, key pair, Elastic IP) and deploys a LAMP stack with optional extras like WordPress and Matomo |
-| `alb-https-installer.sh` | **HTTPS add-on** -- adds an Application Load Balancer with ACM TLS certificate, Route 53 DNS, and HTTPS to an existing deployment |
+| `lamp-aws-installer-al.sh` | **LAMP script** -- creates AWS infrastructure (EC2, security group, key pair, Elastic IP) and deploys a LAMP stack with optional extras like WordPress and Matomo |
+| `alb-https-installer.sh` | **WordPress + HTTPS script** -- standalone end-to-end script that creates all AWS infrastructure, installs LAMP + WordPress, and configures HTTPS via an ALB with ACM certificate and Route 53 DNS |
 | `aws_cli_installer.sh` | **One-time setup helper** -- installs AWS CLI v2 on your local machine, sets the default region to `eu-west-1`, and prompts you to enter your AWS credentials |
 
 ## Features
@@ -25,13 +25,14 @@ This project contains three Bash scripts that streamline the process of standing
 - SSH key pair management with local `~/.ssh/config` setup
 - WordPress installation with WP-CLI, Imagick, and database configuration
 - Matomo Analytics integration with WordPress plugins
+- HTTPS via Application Load Balancer with ACM certificate and Route 53 DNS
 - Retry logic with exponential backoff for key AWS operations
 - Color-coded terminal output with progress spinners
 
 ## Prerequisites
 
 - **AWS CLI** installed and configured with valid credentials (run `aws_cli_installer.sh` or `aws configure`)
-- **AWS IAM permissions** for EC2, VPC, Elastic IP, SSM parameter read, and key pair management (the HTTPS script additionally requires Route 53, ACM, and Elastic Load Balancing permissions)
+- **AWS IAM permissions** for EC2, VPC, Elastic IP, SSM parameter read, and key pair management (the WordPress + HTTPS script additionally requires Route 53, ACM, and Elastic Load Balancing permissions)
 - **Bash** shell with `curl`, `unzip`, and `ssh` available
 
 ## Getting Started
@@ -81,15 +82,15 @@ bash <(curl -sL https://raw.githubusercontent.com/danielcregg/aws-cli-lamp-scrip
 bash <(curl -sL https://raw.githubusercontent.com/danielcregg/aws-cli-lamp-script-amz-linux/refs/heads/main/lamp-aws-installer-al.sh) -mt
 ```
 
-### Adding HTTPS with an ALB
+### WordPress + HTTPS (standalone)
 
-After running the main script with `-wp`, add HTTPS by running:
+Deploy WordPress with HTTPS in a single command — no need to run the LAMP script first:
 
 ```bash
 bash <(curl -sL https://raw.githubusercontent.com/danielcregg/aws-cli-lamp-script-amz-linux/refs/heads/main/alb-https-installer.sh)
 ```
 
-The script will prompt for your domain name, set up Route 53 DNS, provision an ACM certificate, create an ALB, and conditionally update WordPress URLs when HTTPS is reachable and WP is detected.
+This script creates all infrastructure from scratch, installs LAMP + WordPress, then configures an ALB with an ACM TLS certificate and Route 53 DNS. It will prompt for your domain name and pause while you configure your registrar's nameservers.
 
 ### Connecting to the Instance
 
@@ -108,14 +109,15 @@ This works because the script adds a host entry to `~/.ssh/config`.
 | EC2 Instance | `t2.medium`, 10 GB gp3 volume, Amazon Linux 2023 |
 | Security Group | `sgWebServerAuto` -- ports 22, 80, 443, 8080 open |
 | Key Pair | `keyWebServerAuto` -- stored at `~/.ssh/keyWebServerAuto` |
-| Elastic IP | `eipWebServerAuto` -- reused across runs |
-| ALB | `albWebServerAuto` -- internet-facing, HTTPS termination |
-| ALB Security Group | `sgAlbWebServerAuto` -- ports 80, 443 open |
-| Target Group | `tgWebServerAuto` -- HTTP:80, health check on `/` |
-| ACM Certificate | DNS-validated TLS certificate for your domain |
-| Route 53 Hosted Zone | DNS zone with NS, A (alias to ALB), and validation CNAME records |
+| Elastic IP | `eipWebServerAuto` -- reused across runs (LAMP script only) |
+| ALB | `albWebServerAuto` -- internet-facing, HTTPS termination (HTTPS script only) |
+| ALB Security Group | `sgAlbWebServerAuto` -- ports 80, 443 open (HTTPS script only) |
+| ALB Elastic IPs | `eipAlbWebServerAuto-1a`, `-1b`, `-1c` -- one per availability zone (HTTPS script only) |
+| Target Group | `tgWebServerAuto` -- HTTP:80, health check on `/` (HTTPS script only) |
+| ACM Certificate | DNS-validated TLS certificate for your domain (HTTPS script only) |
+| Route 53 Hosted Zone | DNS zone with NS, A (alias to ALB), and validation CNAME records (HTTPS script only) |
 
-On subsequent runs, the script automatically cleans up previous instances and reuses existing Elastic IPs and security groups.
+On subsequent runs, the scripts automatically clean up previous instances and reuse existing security groups, ALBs, and certificates.
 
 ## Default Credentials
 
@@ -124,7 +126,7 @@ On subsequent runs, the script automatically cleans up previous instances and re
 | SFTP (root login) | `root` | `tester` |
 | WordPress admin | `admin` | `password` |
 | WordPress DB user | `wordpressuser` | `password` |
-| Matomo DB user | `matomoadmin` | `password` |
+| Matomo DB user | `matomoadmin` | `password` (LAMP script only) |
 
 > **Security Notice:** This script is intended for development, testing, and demo purposes only. It uses hardcoded default passwords and opens security group ports to `0.0.0.0/0`. Do not use it for production deployments without changing all credentials and restricting network access.
 
@@ -135,8 +137,8 @@ On subsequent runs, the script automatically cleans up previous instances and re
 - **Web Server:** Apache HTTP Server
 - **Database:** MariaDB
 - **Language:** PHP
-- **CMS:** WordPress (optional)
-- **Analytics:** Matomo (optional)
+- **CMS:** WordPress
+- **Analytics:** Matomo (LAMP script only)
 
 ## License
 
