@@ -25,7 +25,7 @@ This project contains three Bash scripts that streamline the process of standing
 - SSH key pair management with local `~/.ssh/config` setup
 - WordPress installation with WP-CLI, Imagick, and database configuration
 - Matomo Analytics integration with WordPress plugins
-- Retry logic with exponential backoff for all AWS operations
+- Retry logic with exponential backoff for key AWS operations
 - Color-coded terminal output with progress spinners
 
 ## Prerequisites
@@ -89,7 +89,7 @@ After running the main script with `-wp`, add HTTPS by running:
 bash <(curl -sL https://raw.githubusercontent.com/danielcregg/aws-cli-lamp-script-amz-linux/refs/heads/main/alb-https-installer.sh)
 ```
 
-The script will prompt for your domain name, set up Route 53 DNS, provision an ACM certificate, create an ALB, and update WordPress URLs automatically.
+The script will prompt for your domain name, set up Route 53 DNS, provision an ACM certificate, create an ALB, and conditionally update WordPress URLs when HTTPS is reachable and WP is detected.
 
 ### Connecting to the Instance
 

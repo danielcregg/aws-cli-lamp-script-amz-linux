@@ -18,12 +18,12 @@ export MSYS_NO_PATHCONV=1
 # Configuration Variables
 ###########################################
 INSTANCE_TAG_NAME="WebServerAuto"
-ELASTIC_IP_TAG_NAME="eipWebServerAuto"
 SSH_KEY_NAME="keyWebServerAuto"
 ALB_SG_NAME="sgAlbWebServerAuto"
 TG_NAME="tgWebServerAuto"
 ALB_NAME="albWebServerAuto"
 ACM_TIMEOUT=600                # Maximum wait time for certificate validation (seconds)
+ALB_TIMEOUT=600                # Maximum wait time for ALB activation (seconds)
 MAX_RETRIES=5                  # Maximum retry attempts for operations
 
 ###########################################
@@ -99,6 +99,17 @@ trap 'stop_spinner; tput cnorm 2>/dev/null' EXIT
 # OSC 8 clickable hyperlink: \e]8;;URL\e\\TEXT\e]8;;\e\\
 link() { printf "\033]8;;%s\033\\%s\033]8;;\033\\" "$1" "$1"; }
 
+# Open a port on a security group (idempotent — ignores duplicates, fails on real errors)
+open_sg_port() {
+    local sg_id="$1"
+    local port="$2"
+    local err
+    err=$(aws ec2 authorize-security-group-ingress --group-id "$sg_id" \
+        --protocol tcp --port "$port" --cidr 0.0.0.0/0 2>&1) && return 0
+    echo "$err" | grep -q "InvalidPermission.Duplicate" && return 0
+    die "Failed to open port $port: $err"
+}
+
 ###########################################
 # Main Script
 ###########################################
@@ -153,6 +164,8 @@ step "Domain name"
 while true; do
     printf "  ${ARROW} Enter your domain name (e.g. example.com): "
     read -r DOMAIN_NAME
+    # Normalize to lowercase to avoid case-sensitive mismatches in Route 53/ACM lookups
+    DOMAIN_NAME="${DOMAIN_NAME,,}"
     # Basic validation: must have at least one dot and no spaces
     if [[ "$DOMAIN_NAME" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$ ]]; then
         break
@@ -166,12 +179,17 @@ ok "Domain: ${DOMAIN_NAME}"
 # ─────────────────────────────────────────
 step "Route 53 hosted zone"
 
-HOSTED_ZONE_ID=$(aws route53 list-hosted-zones-by-name --dns-name "${DOMAIN_NAME}." \
-    --query "HostedZones[?Name=='${DOMAIN_NAME}.'].Id" --output text 2>/dev/null) || true
+# Find only public hosted zones for this domain (filter out private zones)
+mapfile -t ZONE_IDS < <(
+    aws route53 list-hosted-zones-by-name --dns-name "${DOMAIN_NAME}." \
+        --query "HostedZones[?Name=='${DOMAIN_NAME}.' && Config.PrivateZone==\`false\`].Id" \
+        --output text 2>/dev/null | tr '\t' '\n' | sed '/^$/d; /^None$/d'
+)
 
-if [ -n "$HOSTED_ZONE_ID" ] && [ "$HOSTED_ZONE_ID" != "None" ]; then
-    # Strip /hostedzone/ prefix if present
-    HOSTED_ZONE_ID="${HOSTED_ZONE_ID##*/}"
+if [ "${#ZONE_IDS[@]}" -gt 1 ]; then
+    die "Multiple public hosted zones found for ${DOMAIN_NAME} — delete duplicates in the Route 53 console first"
+elif [ "${#ZONE_IDS[@]}" -eq 1 ]; then
+    HOSTED_ZONE_ID="${ZONE_IDS[0]##*/}"
     ok "Reusing existing hosted zone: ${HOSTED_ZONE_ID}"
 else
     HOSTED_ZONE_ID=$(aws route53 create-hosted-zone --name "${DOMAIN_NAME}" \
@@ -200,17 +218,17 @@ read -r
 # ─────────────────────────────────────────
 step "Requesting ACM certificate"
 
-# Check for existing issued certificate
+# Check for existing issued certificate (take first if multiple exist)
 CERT_ARN=$(aws acm list-certificates --certificate-statuses ISSUED \
-    --query "CertificateSummaryList[?DomainName=='${DOMAIN_NAME}'].CertificateArn" \
+    --query "CertificateSummaryList[?DomainName=='${DOMAIN_NAME}'].CertificateArn | [0]" \
     --output text 2>/dev/null) || true
 
 if [ -n "$CERT_ARN" ] && [ "$CERT_ARN" != "None" ]; then
     ok "Reusing existing certificate: ${CERT_ARN}"
 else
-    # Check for pending certificate
+    # Check for pending certificate (take first if multiple exist)
     CERT_ARN=$(aws acm list-certificates --certificate-statuses PENDING_VALIDATION \
-        --query "CertificateSummaryList[?DomainName=='${DOMAIN_NAME}'].CertificateArn" \
+        --query "CertificateSummaryList[?DomainName=='${DOMAIN_NAME}'].CertificateArn | [0]" \
         --output text 2>/dev/null) || true
 
     if [ -z "$CERT_ARN" ] || [ "$CERT_ARN" = "None" ]; then
@@ -221,31 +239,35 @@ else
         ok "Found pending certificate: ${CERT_ARN}"
     fi
 
-    # Wait for DNS validation details to become available
+    # Wait for DNS validation details to become available (retry up to 60s)
     info "Waiting for validation details…"
-    sleep 5
+    CNAME_NAME="None"
+    CNAME_VALUE="None"
+    for _ in $(seq 1 30); do
+        CNAME_NAME=$(aws acm describe-certificate --certificate-arn "$CERT_ARN" \
+            --query 'Certificate.DomainValidationOptions[0].ResourceRecord.Name' --output text)
+        CNAME_VALUE=$(aws acm describe-certificate --certificate-arn "$CERT_ARN" \
+            --query 'Certificate.DomainValidationOptions[0].ResourceRecord.Value' --output text)
+        [ "$CNAME_NAME" != "None" ] && [ -n "$CNAME_NAME" ] && \
+        [ "$CNAME_VALUE" != "None" ] && [ -n "$CNAME_VALUE" ] && break
+        sleep 2
+    done
+    [ "$CNAME_NAME" = "None" ] || [ -z "$CNAME_NAME" ] && \
+        die "ACM validation record not available — try again in a few minutes"
 
-    # Get DNS validation CNAME record
-    CNAME_NAME=$(aws acm describe-certificate --certificate-arn "$CERT_ARN" \
-        --query 'Certificate.DomainValidationOptions[0].ResourceRecord.Name' --output text)
-    CNAME_VALUE=$(aws acm describe-certificate --certificate-arn "$CERT_ARN" \
-        --query 'Certificate.DomainValidationOptions[0].ResourceRecord.Value' --output text)
-
-    if [ -n "$CNAME_NAME" ] && [ "$CNAME_NAME" != "None" ]; then
-        info "Creating DNS validation record…"
-        aws route53 change-resource-record-sets --hosted-zone-id "$HOSTED_ZONE_ID" --change-batch '{
-            "Changes": [{
-                "Action": "UPSERT",
-                "ResourceRecordSet": {
-                    "Name": "'"$CNAME_NAME"'",
-                    "Type": "CNAME",
-                    "TTL": 300,
-                    "ResourceRecords": [{"Value": "'"$CNAME_VALUE"'"}]
-                }
-            }]
-        }' > /dev/null
-        ok "Validation CNAME record created"
-    fi
+    info "Creating DNS validation record…"
+    aws route53 change-resource-record-sets --hosted-zone-id "$HOSTED_ZONE_ID" --change-batch '{
+        "Changes": [{
+            "Action": "UPSERT",
+            "ResourceRecordSet": {
+                "Name": "'"$CNAME_NAME"'",
+                "Type": "CNAME",
+                "TTL": 300,
+                "ResourceRecords": [{"Value": "'"$CNAME_VALUE"'"}]
+            }
+        }]
+    }' > /dev/null
+    ok "Validation CNAME record created"
 
     # Wait for certificate to be issued
     spinner "Waiting for certificate validation (up to 10 min)…" &
@@ -287,11 +309,9 @@ else
     ok "Security group created: ${ALB_SG_ID}"
 fi
 
-# Ensure ports 80 and 443 are open (idempotent — skips ports already open)
-aws ec2 authorize-security-group-ingress --group-id "$ALB_SG_ID" \
-    --protocol tcp --port 80 --cidr 0.0.0.0/0 > /dev/null 2>&1 || true
-aws ec2 authorize-security-group-ingress --group-id "$ALB_SG_ID" \
-    --protocol tcp --port 443 --cidr 0.0.0.0/0 > /dev/null 2>&1 || true
+# Ensure ports 80 and 443 are open (idempotent — skips duplicates, fails on real errors)
+open_sg_port "$ALB_SG_ID" 80
+open_sg_port "$ALB_SG_ID" 443
 ok "Ports open: 80 (HTTP), 443 (HTTPS)"
 
 # ─────────────────────────────────────────
@@ -303,6 +323,10 @@ TG_ARN=$(aws elbv2 describe-target-groups --names "${TG_NAME}" \
     --query 'TargetGroups[0].TargetGroupArn' --output text 2>/dev/null) || true
 
 if [ -n "$TG_ARN" ] && [ "$TG_ARN" != "None" ]; then
+    # Validate the existing target group is in the correct VPC
+    TG_VPC=$(aws elbv2 describe-target-groups --target-group-arns "$TG_ARN" \
+        --query 'TargetGroups[0].VpcId' --output text)
+    [ "$TG_VPC" != "$VPC_ID" ] && die "Target group ${TG_NAME} is in VPC ${TG_VPC}, expected ${VPC_ID}"
     ok "Reusing existing target group"
 else
     TG_ARN=$(aws elbv2 create-target-group --name "${TG_NAME}" \
@@ -347,7 +371,10 @@ else
     # Wait for ALB to become active
     spinner "Waiting for load balancer to become active…" &
     SPIN_PID=$!
+    ALB_START=$(date +%s)
     while true; do
+        elapsed=$(( $(date +%s) - ALB_START ))
+        [ "$elapsed" -gt "$ALB_TIMEOUT" ] && { stop_spinner; die "ALB activation timed out after ${ALB_TIMEOUT}s"; }
         ALB_STATE=$(aws elbv2 describe-load-balancers --load-balancer-arns "$ALB_ARN" \
             --query 'LoadBalancers[0].State.Code' --output text)
         if [ "$ALB_STATE" = "active" ]; then
@@ -400,7 +427,7 @@ fi
 # ─────────────────────────────────────────
 step "Route 53 A record"
 
-aws route53 change-resource-record-sets --hosted-zone-id "$HOSTED_ZONE_ID" --change-batch '{
+CHANGE_ID=$(aws route53 change-resource-record-sets --hosted-zone-id "$HOSTED_ZONE_ID" --change-batch '{
     "Changes": [{
         "Action": "UPSERT",
         "ResourceRecordSet": {
@@ -413,8 +440,15 @@ aws route53 change-resource-record-sets --hosted-zone-id "$HOSTED_ZONE_ID" --cha
             }
         }
     }]
-}' > /dev/null
+}' --query 'ChangeInfo.Id' --output text)
 ok "A record: ${DOMAIN_NAME} → ALB"
+
+# Wait for DNS change to propagate within Route 53
+spinner "Waiting for Route 53 DNS propagation…" &
+SPIN_PID=$!
+aws route53 wait resource-record-sets-changed --id "$CHANGE_ID" 2>/dev/null || true
+stop_spinner
+ok "DNS change propagated"
 
 # ─────────────────────────────────────────
 # Step 10: Test HTTPS and update WordPress
@@ -431,18 +465,20 @@ for attempt in $(seq 1 $MAX_RETRIES); do
     sleep 15
 done
 
+KEY_PATH="${HOME}/.ssh/${SSH_KEY_NAME}"
+
 if [ "$HTTPS_OK" = true ]; then
     ok "HTTPS is working"
 
     # Update WordPress URLs if WP is installed and SSH is available
-    if [ -n "$INSTANCE_PUBLIC_IP" ] && [ -f ~/.ssh/${SSH_KEY_NAME} ]; then
+    if [ -n "$INSTANCE_PUBLIC_IP" ] && [ -f "$KEY_PATH" ]; then
         info "Checking for WordPress installation…"
-        WP_CHECK=$(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
-            -i ~/.ssh/${SSH_KEY_NAME} ec2-user@"$INSTANCE_PUBLIC_IP" \
+        WP_CHECK=$(ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 \
+            -i "$KEY_PATH" ec2-user@"$INSTANCE_PUBLIC_IP" \
             "sudo -u apache wp core is-installed --path=/var/www/html/ 2>/dev/null && echo 'installed'" 2>/dev/null) || true
 
         if [ "$WP_CHECK" = "installed" ]; then
-            ssh -o StrictHostKeyChecking=no -i ~/.ssh/${SSH_KEY_NAME} ec2-user@"$INSTANCE_PUBLIC_IP" \
+            ssh -o StrictHostKeyChecking=accept-new -i "$KEY_PATH" ec2-user@"$INSTANCE_PUBLIC_IP" \
                 "sudo -u apache wp option update siteurl 'https://${DOMAIN_NAME}' --path=/var/www/html/ --quiet 2>/dev/null && \
                  sudo -u apache wp option update home 'https://${DOMAIN_NAME}' --path=/var/www/html/ --quiet 2>/dev/null"
             ok "WordPress URLs updated to https://${DOMAIN_NAME}"
